@@ -19,14 +19,11 @@ package sortition
 import (
 	"math/rand"
 	"testing"
-
-	"github.com/algorand/go-algorand/crypto"
-	"github.com/algorand/go-algorand/test/partitiontest"
 )
 
 func BenchmarkSortition(b *testing.B) {
 	b.StopTimer()
-	keys := make([]crypto.Digest, b.N)
+	keys := make([]Digest, b.N)
 	for i := 0; i < b.N; i++ {
 		rand.Read(keys[i][:])
 	}
@@ -37,14 +34,13 @@ func BenchmarkSortition(b *testing.B) {
 }
 
 func TestSortitionBasic(t *testing.T) {
-	partitiontest.PartitionTest(t)
 	hitcount := uint64(0)
 	const N = 1000
 	const expectedSize = 20
 	const myMoney = 100
 	const totalMoney = 200
 	for i := 0; i < N; i++ {
-		var vrfOutput crypto.Digest
+		var vrfOutput Digest
 		rand.Read(vrfOutput[:])
 		selected := Select(myMoney, totalMoney, expectedSize, vrfOutput)
 		hitcount += selected
