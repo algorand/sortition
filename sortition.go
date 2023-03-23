@@ -24,19 +24,24 @@ package sortition
 import "C"
 
 import (
+	"crypto/sha512"
 	"fmt"
 	"math/big"
 	"strings"
-
-	"github.com/algorand/go-algorand/crypto"
 )
 
-const precision = uint(8 * (crypto.DigestSize + 1))
+// DigestSize is the number of bytes in the preferred hash Digest used here.
+const DigestSize = sha512.Size256
+
+// Digest represents a 32-byte value holding the 256-bit Hash digest.
+type Digest [DigestSize]byte
+
+const precision = uint(8 * (DigestSize + 1))
 
 var maxFloat *big.Float
 
 // Select runs the sortition function and returns the number of time the key was selected
-func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput crypto.Digest) uint64 {
+func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Digest) uint64 {
 	binomialN := float64(money)
 	binomialP := expectedSize / float64(totalMoney)
 
@@ -56,7 +61,7 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput cry
 func init() {
 	var b int
 	var err error
-	maxFloatString := fmt.Sprintf("0x%s", strings.Repeat("ff", crypto.DigestSize))
+	maxFloatString := fmt.Sprintf("0x%s", strings.Repeat("ff", DigestSize))
 	maxFloat, b, err = big.ParseFloat(maxFloatString, 0, precision, big.ToNearestEven)
 	if b != 16 || err != nil {
 		err = fmt.Errorf("failed to parse big float constant in sortition : %w", err)
