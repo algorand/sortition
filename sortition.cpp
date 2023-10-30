@@ -3,8 +3,8 @@
 #if !defined(BOOST_VERSION)
 #error Boost version not defined
 #endif
-#if BOOST_VERSION != 106501
-#error Boost version does not match 1.65.1
+#if BOOST_VERSION < 106501
+#error Boost version 1.65.1 or later is required.
 #endif
 
 uint64_t sortition_binomial_cdf_walk(double n, double p, double ratio, uint64_t money) {
