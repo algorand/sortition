@@ -58,6 +58,30 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 	return uint64(C.sortition_binomial_cdf_walk(C.double(binomialN), C.double(binomialP), C.double(cratio), C.uint64_t(money)))
 }
 
+// SelectF128 is a pure-Go, cgo-free, deterministic equivalent of Select. Compare
+// it line-by-line with Select above: the two function bodies are IDENTICAL except
+// the final call -- where Select invokes the C++ sortition_binomial_cdf_walk
+// (Boost, hardware double), SelectF128 invokes binomialCDFWalkF128 (software
+// f128, see f128.go). Both perform the same binomial-CDF walk and return the same
+// selection count; SelectF128's result is additionally bit-reproducible on every
+// platform/toolchain (no libm, no FMA, no hardware floating point).
+func SelectF128(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Digest) uint64 {
+	binomialN := float64(money)
+	binomialP := expectedSize / float64(totalMoney)
+
+	t := &big.Int{}
+	t.SetBytes(vrfOutput[:])
+
+	h := big.Float{}
+	h.SetPrec(precision)
+	h.SetInt(t)
+
+	ratio := big.Float{}
+	cratio, _ := ratio.Quo(&h, maxFloat).Float64()
+
+	return binomialCDFWalkF128(binomialN, binomialP, cratio, money)
+}
+
 func init() {
 	var b int
 	var err error
