@@ -18,7 +18,7 @@ package sortition
 
 import (
 	"encoding/binary"
-	"math/big"
+	"math"
 	"math/bits"
 )
 
@@ -43,8 +43,8 @@ type f128 struct {
 	exp    int
 }
 
-// f128MantBits is the f128 mantissa width; the big.Float setup constants are
-// formed at this same precision so they round to f128 exactly.
+// f128MantBits is the f128 mantissa width. The big.Float oracle in the test
+// forms its constants at this same precision so they round to f128 exactly.
 const f128MantBits = 128
 
 func (a f128) isZero() bool { return a.hi == 0 && a.lo == 0 }
@@ -223,6 +223,20 @@ func f128FromUint64(u uint64) f128 {
 	return f128{u << uint(s), 0, -(s + 64)}
 }
 
+func f128FromFloat64(f float64) f128 {
+	if f <= 0 {
+		return f128{}
+	}
+	b := math.Float64bits(f)
+	mant := b & (1<<52 - 1)
+	exp := int((b >> 52) & 0x7ff)
+	if exp == 0 { // subnormal: value = mant * 2^-1074
+		return norm128(0, mant, -1074)
+	}
+	// normal: significand (mant|2^52) in [2^52,2^53); MSB (bit 52) -> bit 127.
+	return f128{(mant | 1<<52) << 11, 0, exp - 1150}
+}
+
 // f128FromDigestRatio returns digest/(2^256-1), rounded to nearest-even at
 // f128 precision, without reducing the digest to float64 first.
 func f128FromDigestRatio(d Digest) f128 {
@@ -257,24 +271,6 @@ func f128FromDigestRatio(d Digest) f128 {
 		sticky = true
 	}
 	return roundNE(n3, n2, roundBit, sticky, -128-leading)
-}
-
-var f128bigMask = new(big.Int).SetUint64(^uint64(0))
-
-// f128FromBigFloat converts a (one-time, setup) big.Float constant to f128,
-// rounding to nearest even at 128 bits (so it matches a 128-bit big.Float).
-func f128FromBigFloat(x *big.Float) f128 {
-	if x.Sign() <= 0 {
-		return f128{}
-	}
-	r := new(big.Float).SetPrec(128).Set(x) // round to 128-bit mantissa, nearest-even
-	m := new(big.Float).SetPrec(256)
-	e := r.MantExp(m)    // r = m * 2^e, m in [0.5,1), 128-bit
-	m.SetMantExp(m, 128) // m * 2^128 = exact 128-bit integer
-	bi, _ := m.Int(nil)
-	lo := new(big.Int).And(bi, f128bigMask).Uint64()
-	hi := new(big.Int).Rsh(bi, 64).Uint64()
-	return norm128(hi, lo, e-128)
 }
 
 // mul returns a*b rounded to nearest even.
@@ -321,6 +317,103 @@ func (a f128) divU(u uint64) f128 {
 		q0 |= 1 // mark sticky for the division remainder
 	}
 	return norm192(q2, q1, q0, a.exp-64)
+}
+
+// divStep is one digit step of Knuth's Algorithm D for a normalized (top bit
+// set) 128-bit divisor v1:v0: it divides the 192-bit value uHi:uMid:uLo by
+// v1:v0, where the running-remainder prefix uHi:uMid is already < v1:v0, and
+// returns the 64-bit quotient digit q and the new 128-bit remainder rHi:rLo.
+func divStep(uHi, uMid, uLo, v1, v0 uint64) (q, rHi, rLo uint64) {
+	// qhat = min((uHi:uMid)/v1, 2^64-1); Div64 requires uHi < v1, so cap when
+	// uHi == v1 (the running remainder guarantees uHi never exceeds v1).
+	var qhat, rhat uint64
+	refine := true
+	if uHi >= v1 {
+		qhat = ^uint64(0)
+		var c uint64
+		rhat, c = bits.Add64(uMid, v1, 0) // rhat = (v1:uMid) - qhat*v1 = uMid + v1
+		if c != 0 {
+			refine = false // rhat >= 2^64: the refine test is already false
+		}
+	} else {
+		qhat, rhat = bits.Div64(uHi, uMid, v1)
+	}
+	// Lower qhat (over-estimated by at most 2) until qhat*v0 <= rhat:uLo.
+	for refine {
+		hi, lo := bits.Mul64(qhat, v0)
+		if hi > rhat || (hi == rhat && lo > uLo) {
+			qhat--
+			var c uint64
+			rhat, c = bits.Add64(rhat, v1, 0)
+			if c != 0 {
+				break
+			}
+			continue
+		}
+		break
+	}
+	// u - qhat*(v1:v0), a 192-bit subtraction.
+	p1hi, p1lo := bits.Mul64(qhat, v1)
+	p0hi, p0lo := bits.Mul64(qhat, v0)
+	prodMid, c := bits.Add64(p1lo, p0hi, 0)
+	prodHi := p1hi + c
+	sLo, br := bits.Sub64(uLo, p0lo, 0)
+	sMid, br := bits.Sub64(uMid, prodMid, br)
+	_, br = bits.Sub64(uHi, prodHi, br)
+	q = qhat
+	if br != 0 { // qhat was 1 too large: add the divisor back
+		q--
+		sLo, c = bits.Add64(sLo, v0, 0)
+		sMid, _ = bits.Add64(sMid, v1, c)
+	}
+	return q, sMid, sLo
+}
+
+// div returns a/b rounded to nearest even, for NON-NEGATIVE operands (b != 0).
+// It divides the 256-bit a.hi:a.lo:0:0 by the normalized 128-bit b.hi:b.lo via
+// Knuth long division. Since both mantissas are in [2^127,2^128), the ratio is
+// in (0.5,2), so the 129-bit integer quotient Q is either already normalized
+// (Q < 2^128) or one bit wide (Q >= 2^128); the division remainder supplies the
+// bits below Q for round-to-nearest-even. Unlike divU (small integer divisor),
+// this handles a full f128 divisor; it is used once per setup, not in the walk.
+func (a f128) div(b f128) f128 {
+	if a.isZero() || b.isZero() {
+		return f128{}
+	}
+	v1, v0 := b.hi, b.lo
+	// Long-divide [a.hi, a.lo, 0, 0] by v1:v0, most-significant limb first.
+	var remHi, remLo uint64
+	var q1, q0 uint64 // the two low quotient digits; the top two are 0 and {0,1}
+	var q2 uint64
+	digit, remHi, remLo := divStep(remHi, remLo, a.hi, v1, v0) // = 0
+	_ = digit
+	q2, remHi, remLo = divStep(remHi, remLo, a.lo, v1, v0) // in {0,1}
+	q1, remHi, remLo = divStep(remHi, remLo, 0, v1, v0)
+	q0, remHi, remLo = divStep(remHi, remLo, 0, v1, v0)
+
+	expq := a.exp - b.exp - 128
+	if q2 != 0 { // Q in [2^128,2^129): mantissa = Q>>1, dropped low bit is round
+		mantHi := q2<<63 | q1>>1
+		mantLo := q1<<63 | q0>>1
+		round := q0&1 != 0
+		sticky := remHi != 0 || remLo != 0
+		return roundNE(mantHi, mantLo, round, sticky, expq+1)
+	}
+	// Q in [2^127,2^128): already normalized; round/sticky come from rem/b, i.e.
+	// round = (2*rem >= b), sticky = the leftover after that comparison.
+	dblLo := remLo << 1
+	dblHi := remHi<<1 | remLo>>63
+	carry := remHi >> 63
+	var round, sticky bool
+	if carry != 0 || dblHi > v1 || (dblHi == v1 && dblLo >= v0) {
+		round = true
+		sLo, br := bits.Sub64(dblLo, v0, 0)
+		sHi, _ := bits.Sub64(dblHi, v1, br)
+		sticky = sHi != 0 || sLo != 0
+	} else {
+		sticky = remHi != 0 || remLo != 0
+	}
+	return roundNE(q1, q0, round, sticky, expq)
 }
 
 // add returns a+b (both non-negative), rounded to nearest even.
@@ -435,14 +528,6 @@ func (a f128) cmp(b f128) int {
 	return 0
 }
 
-// toBigFloat returns the exact value as a big.Float (debug/inspection only).
-func (a f128) toBigFloat() *big.Float {
-	hiF := new(big.Float).SetPrec(256).SetUint64(a.hi)
-	hiF.SetMantExp(hiF, 64)
-	m := new(big.Float).SetPrec(256).Add(hiF, new(big.Float).SetPrec(256).SetUint64(a.lo))
-	return m.SetMantExp(m, a.exp)
-}
-
 // intPow returns base^e by exponentiation by squaring (integer exponent).
 func (base f128) intPow(e uint64) f128 {
 	result := f128FromUint64(1)
@@ -481,23 +566,18 @@ type binomialF128 struct {
 
 // newBinomialF128 constructs the Binomial(money, p) CDF evaluator -- the analogue
 // of constructing binomial_distribution<double>(n=money, p). The PMF-recurrence
-// constants 1-p and p/(1-p) are formed once in big.Float (exact for the float64
-// p) and rounded to f128. Returns nil for the degenerate p >= 1 (all probability
-// mass at j == money), which the caller handles.
+// constants 1-p and p/(1-p) are formed once, entirely in f128 (no big.Float, no
+// heap): 1-p is exact for the float64 p, and p/(1-p) is a round-to-nearest-even
+// f128 divide. Returns nil for the degenerate p >= 1 (all probability mass at
+// j == money), which the caller handles.
 func newBinomialF128(p float64, money uint64) *binomialF128 {
-	// 1-p is exact in f128 (p is a float64), so compute it natively rather than in
-	// big.Float; qf equals f128FromBigFloat(1-p) bit-for-bit (checked by the fuzz).
 	pf := f128FromFloat64(p)
 	if pf.cmp(f128FromUint64(1)) >= 0 { // p >= 1
 		return nil
 	}
-	qf := f128FromUint64(1).sub(pf) // 1-p
-	// pq = p/(1-p) still needs a full divide, which f128 lacks, so form it in
-	// big.Float and round to f128.
-	pb := new(big.Float).SetPrec(f128MantBits).SetFloat64(p)
-	qb := new(big.Float).SetPrec(f128MantBits).Sub(new(big.Float).SetPrec(f128MantBits).SetInt64(1), pb)
-	pq := f128FromBigFloat(new(big.Float).SetPrec(f128MantBits).Quo(pb, qb))
-	pmf0 := qf.intPow(money) // (1-p)^money
+	qf := f128FromUint64(1).sub(pf) // 1-p (exact)
+	pq := pf.div(qf)                // p/(1-p)
+	pmf0 := qf.intPow(money)        // (1-p)^money
 	return &binomialF128{money: money, pq: pq, pmf: pmf0, cum: pmf0, at: 0}
 }
 

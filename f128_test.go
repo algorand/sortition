@@ -215,7 +215,7 @@ func TestF128DigestRatioMatchesBigFloat(t *testing.T) {
 	}
 
 	for _, d := range cases {
-		got := f128FromDigestRatio(d).toBigFloat()
+		got := f128ToBig(f128FromDigestRatio(d))
 		want := digestRatioBig(d, f128MantBits)
 		if got.Cmp(want) != 0 {
 			t.Fatalf("digest ratio mismatch for %x: f128=%v big.Float=%v", d, got, want)
@@ -275,10 +275,11 @@ func FuzzF128Ops(f *testing.F) {
 	f.Fuzz(func(t *testing.T, ahi, alo uint64, aexp int, bhi, blo uint64, bexp int, u uint64) {
 		a := norm128(ahi, alo, aexp%4000-2000)
 		b := norm128(bhi, blo, bexp%4000-2000)
-		ab, bb := a.toBigFloat(), b.toBigFloat()
+		ab, bb := f128ToBig(a), f128ToBig(b)
 		check := func(name string, got f128, want *big.Float) {
-			if got.toBigFloat().Cmp(want) != 0 {
-				t.Fatalf("%s: f128=%v big.Float=%v (a=%v b=%v u=%d)", name, got.toBigFloat(), want, ab, bb, u)
+			gotBig := f128ToBig(got)
+			if gotBig.Cmp(want) != 0 {
+				t.Fatalf("%s: f128=%v big.Float=%v (a=%v b=%v u=%d)", name, gotBig, want, ab, bb, u)
 			}
 		}
 		check("mul", a.mul(b), new(big.Float).SetPrec(f128MantBits).Mul(ab, bb))
@@ -309,6 +310,34 @@ func TestF128MatchesOracleLargeMoney(t *testing.T) {
 		rng.Read(d[:])
 		if got, want := SelectF128(money, total, size, d), selectBigOracle(money, total, size, d); got != want {
 			t.Fatalf("SelectF128=%d != oracle=%d (money=%d size=%g vrf=%x)", got, want, money, size, d)
+		}
+	}
+}
+
+// f128ToBig returns the exact value of an f128 as a big.Float (test helper).
+func f128ToBig(x f128) *big.Float {
+	hi := new(big.Float).SetPrec(300).SetUint64(x.hi)
+	hi.SetMantExp(hi, 64)
+	m := new(big.Float).SetPrec(300).Add(hi, new(big.Float).SetPrec(300).SetUint64(x.lo))
+	return m.SetMantExp(m, x.exp)
+}
+
+// TestDivVsBig checks f128.div against a 128-bit round-nearest-even big.Float
+// divide on broad random operands. The SelectF128 fuzz only exercises div with
+// the p/(1-p) shape, so this independently validates the hand-rolled Knuth
+// long division across the full input space (spanning exponents and the
+// Q<2^128 vs Q>=2^128 normalization cases).
+func TestDivVsBig(t *testing.T) {
+	rng := rand.New(rand.NewSource(2))
+	randF128 := func() f128 {
+		return f128{rng.Uint64() | 1<<63, rng.Uint64(), rng.Intn(4000) - 2000} // normalized
+	}
+	for i := 0; i < 5_000_000; i++ {
+		a, b := randF128(), randF128()
+		got := f128ToBig(a.div(b))
+		want := new(big.Float).SetPrec(f128MantBits).Quo(f128ToBig(a), f128ToBig(b))
+		if got.Cmp(want) != 0 {
+			t.Fatalf("div mismatch: a=%+v b=%+v got=%s want=%s", a, b, got.Text('p', 0), want.Text('p', 0))
 		}
 	}
 }
