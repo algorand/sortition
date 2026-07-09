@@ -192,6 +192,29 @@ func norm192(r2, r1, r0 uint64, exp int) f128 {
 	return roundNE(s2, s1, roundBit, sticky, exp+64-lz)
 }
 
+// norm192s is norm192 with an incoming sticky bit: extra records that nonzero
+// bits were discarded below r0 (used by sub, where aligning the subtrahend can
+// shift bits past the 192-bit window). All such bits are far below the result's
+// round bit, so they only ever contribute to sticky.
+func norm192s(r2, r1, r0 uint64, exp int, extra bool) f128 {
+	if r2 == 0 && r1 == 0 && r0 == 0 {
+		return f128{}
+	}
+	var lz int
+	switch {
+	case r2 != 0:
+		lz = bits.LeadingZeros64(r2)
+	case r1 != 0:
+		lz = 64 + bits.LeadingZeros64(r1)
+	default:
+		lz = 128 + bits.LeadingZeros64(r0)
+	}
+	s2, s1, s0 := shl192(r2, r1, r0, uint(lz))
+	roundBit := s0&(1<<63) != 0
+	sticky := s0&^(uint64(1)<<63) != 0 || extra
+	return roundNE(s2, s1, roundBit, sticky, exp+64-lz)
+}
+
 func f128FromUint64(u uint64) f128 {
 	if u == 0 {
 		return f128{}
@@ -329,6 +352,61 @@ func (a f128) add(b f128) f128 {
 	return roundNE(shi, slo, round, sticky, exp)
 }
 
+// sub returns a-b, rounded to nearest even, for NON-NEGATIVE operands with
+// a >= b (f128 is unsigned; a < b returns zero). The subtraction is performed
+// exactly in a 192-bit field -- a occupies a.hi:a.lo:0, giving 64 guard bits
+// below a's ulp -- so it is correct even under catastrophic cancellation
+// (a ~= b). b is aligned into that field by an arithmetic right shift; any bits
+// pushed below bit 0 (only possible when b << a, i.e. no cancellation) are
+// folded into sticky. When such bits exist, one field-ulp is borrowed first so
+// the residual (field-ulp - discarded) rounds correctly as pure sticky.
+func (a f128) sub(b f128) f128 {
+	if b.isZero() {
+		return a
+	}
+	if a.cmp(b) <= 0 {
+		return f128{}
+	}
+	diff := uint(a.exp - b.exp)
+	var b2, b1, b0 uint64
+	var sticky bool
+	switch {
+	case diff == 0:
+		b2, b1, b0 = b.hi, b.lo, 0
+	case diff < 64:
+		b2 = b.hi >> diff
+		b1 = b.hi<<(64-diff) | b.lo>>diff
+		b0 = b.lo << (64 - diff)
+	case diff == 64:
+		b2, b1, b0 = 0, b.hi, b.lo
+	case diff < 128:
+		s := diff - 64
+		b1 = b.hi >> s
+		b0 = b.hi<<(64-s) | b.lo>>s
+		sticky = b.lo<<(64-s) != 0
+	case diff == 128:
+		b0 = b.hi
+		sticky = b.lo != 0
+	case diff < 192:
+		s := diff - 128
+		b0 = b.hi >> s
+		sticky = b.hi<<(64-s) != 0 || b.lo != 0
+	default:
+		sticky = true // b nonzero, entirely below the field
+	}
+	if sticky { // borrow one field-ulp so the discarded remainder is pure sticky
+		var brw uint64
+		b0, brw = bits.Add64(b0, 1, 0)
+		b1, brw = bits.Add64(b1, 0, brw)
+		b2 += brw
+	}
+	// a >= b, so the 192-bit subtraction A - B never borrows out of the top.
+	r0, brw := bits.Sub64(0, b0, 0)
+	r1, brw := bits.Sub64(a.lo, b1, brw)
+	r2, _ := bits.Sub64(a.hi, b2, brw)
+	return norm192s(r2, r1, r0, a.exp-64, sticky)
+}
+
 func (a f128) cmp(b f128) int {
 	az, bz := a.isZero(), b.isZero()
 	switch {
@@ -407,13 +485,19 @@ type binomialF128 struct {
 // p) and rounded to f128. Returns nil for the degenerate p >= 1 (all probability
 // mass at j == money), which the caller handles.
 func newBinomialF128(p float64, money uint64) *binomialF128 {
-	pb := new(big.Float).SetPrec(f128MantBits).SetFloat64(p)
-	qb := new(big.Float).SetPrec(f128MantBits).Sub(new(big.Float).SetPrec(f128MantBits).SetInt64(1), pb)
-	if qb.Sign() <= 0 { // p >= 1
+	// 1-p is exact in f128 (p is a float64), so compute it natively rather than in
+	// big.Float; qf equals f128FromBigFloat(1-p) bit-for-bit (checked by the fuzz).
+	pf := f128FromFloat64(p)
+	if pf.cmp(f128FromUint64(1)) >= 0 { // p >= 1
 		return nil
 	}
+	qf := f128FromUint64(1).sub(pf) // 1-p
+	// pq = p/(1-p) still needs a full divide, which f128 lacks, so form it in
+	// big.Float and round to f128.
+	pb := new(big.Float).SetPrec(f128MantBits).SetFloat64(p)
+	qb := new(big.Float).SetPrec(f128MantBits).Sub(new(big.Float).SetPrec(f128MantBits).SetInt64(1), pb)
 	pq := f128FromBigFloat(new(big.Float).SetPrec(f128MantBits).Quo(pb, qb))
-	pmf0 := f128FromBigFloat(qb).intPow(money) // (1-p)^money
+	pmf0 := qf.intPow(money) // (1-p)^money
 	return &binomialF128{money: money, pq: pq, pmf: pmf0, cum: pmf0, at: 0}
 }
 
