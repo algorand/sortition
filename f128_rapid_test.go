@@ -30,7 +30,9 @@ import (
 // (u > ~2^62) survived ~30M fuzz execs with u=1 and u=7 seeds, while rapid
 // found it within its first hundred generated cases. The generators below add
 // explicit magnitude-band guidance on top of rapid's own boundary bias so
-// every regime is sampled every run. Raise the case count in a long run with:
+// every regime is sampled every run. Ordinary go test runs 100 cases per
+// test; CI runs them again at -rapid.checks=20000, and a long run can go
+// deeper:
 //
 //	go test -run TestRapid -rapid.checks=100000
 //
@@ -48,14 +50,59 @@ func bandedUint64(t *rapid.T, label string) uint64 {
 	).Draw(t, label)
 }
 
+// bandedMantissa draws mantissa words by structure, not just value: uniform
+// bits, sparse (a few set bits), or dense (all ones with a few holes). Sparse
+// and dense mantissas raise the density of exact ties and of carry-out
+// renormalization, which sit near ~2^-64 measure under uniform draws.
+func bandedMantissa(t *rapid.T, label string) (uint64, uint64) {
+	switch rapid.IntRange(0, 2).Draw(t, label+"Kind") {
+	case 0:
+		return rapid.Uint64().Draw(t, label+"Hi"), rapid.Uint64().Draw(t, label+"Lo")
+	case 1: // sparse
+		var hi, lo uint64
+		for range rapid.IntRange(1, 3).Draw(t, label+"Bits") {
+			b := rapid.IntRange(0, 127).Draw(t, label+"Bit")
+			if b >= 64 {
+				hi |= 1 << (b - 64)
+			} else {
+				lo |= 1 << b
+			}
+		}
+		return hi, lo
+	default: // dense
+		hi, lo := ^uint64(0), ^uint64(0)
+		for range rapid.IntRange(0, 3).Draw(t, label+"Holes") {
+			b := rapid.IntRange(0, 127).Draw(t, label+"Hole")
+			if b >= 64 {
+				hi &^= 1 << (b - 64)
+			} else {
+				lo &^= 1 << b
+			}
+		}
+		return hi, lo
+	}
+}
+
 // TestRapidF128Ops property-tests every f128 primitive against 128-bit
-// big.Float, mirroring FuzzF128Ops.
+// big.Float, mirroring FuzzF128Ops, plus the oracle-independent commutativity
+// of mul and add (asymmetric partial-product assembly cannot hide from these
+// even if a bug were somehow mirrored into the reference computation).
 func TestRapidF128Ops(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		a := norm128(rapid.Uint64().Draw(t, "ahi"), rapid.Uint64().Draw(t, "alo"),
-			rapid.Int64Range(-2000, 2000).Draw(t, "aexp"))
-		b := norm128(rapid.Uint64().Draw(t, "bhi"), rapid.Uint64().Draw(t, "blo"),
-			rapid.Int64Range(-2000, 2000).Draw(t, "bexp"))
+		ahi, alo := bandedMantissa(t, "a")
+		aexp := rapid.Int64Range(-2000, 2000).Draw(t, "aexp")
+		a := norm128(ahi, alo, aexp)
+		// Band the exponent gap: add's alignment boundaries sit at gaps of
+		// exactly 64, 127, 128, and 129, which a uniform pair of exponents
+		// rarely produces.
+		gap := rapid.OneOf(
+			rapid.Int64Range(-4, 4),
+			rapid.Int64Range(-68, -60), rapid.Int64Range(60, 68),
+			rapid.Int64Range(-132, -124), rapid.Int64Range(124, 132),
+			rapid.Int64Range(-2000, 2000),
+		).Draw(t, "gap")
+		bhi, blo := bandedMantissa(t, "b")
+		b := norm128(bhi, blo, aexp-gap)
 		u := bandedUint64(t, "u")
 		ab, bb := f128ToBig(a), f128ToBig(b)
 		check := func(name string, got f128, want *big.Float) {
@@ -71,6 +118,12 @@ func TestRapidF128Ops(t *testing.T) {
 		}
 		if !b.isZero() {
 			check("div", a.div(b), new(big.Float).SetPrec(f128MantBits).Quo(ab, bb))
+		}
+		if x, y := a.mul(b), b.mul(a); x != y {
+			t.Fatalf("mul not commutative: %+v vs %+v (a=%v b=%v)", x, y, ab, bb)
+		}
+		if x, y := a.add(b), b.add(a); x != y {
+			t.Fatalf("add not commutative: %+v vs %+v (a=%v b=%v)", x, y, ab, bb)
 		}
 	})
 }
@@ -107,6 +160,34 @@ func TestRapidSelectF128VsOracle(t *testing.T) {
 		if got != want {
 			t.Fatalf("SelectF128=%d != oracle=%d (money=%d total=%d expected=%d vrf=%x)",
 				got, want, money, total, expected, d)
+		}
+	})
+}
+
+// TestRapidSelectF128DigestMonotonic checks an ORACLE-INDEPENDENT property:
+// for fixed (money, total, expected), the selection count is non-decreasing in
+// the digest. This holds exactly -- the digest-to-ratio conversion is monotone
+// (round-to-nearest of a monotone quotient, and the halfway correction only
+// ever rounds up), and a larger ratio can only cross the same CDF boundaries
+// later or freeze to money. The differential tests share one structural blind
+// spot: a defect mirrored into the big.Float oracle (as the pmf(0) plateau
+// was) is invisible to them; a property test against mathematics is not.
+func TestRapidSelectF128DigestMonotonic(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		money := rapid.Uint64Range(0, 3000).Draw(t, "money")
+		total := rapid.Uint64Range(0, 10_000_000_000_000_000).Draw(t, "total")
+		expected := rapid.Uint64Range(0, 10_000).Draw(t, "expected")
+		var d1, d2 Digest
+		copy(d1[:], rapid.SliceOfN(rapid.Byte(), DigestSize, DigestSize).Draw(t, "vrf"))
+		// OR-ing random bits into d1 yields d2 >= d1 as a 256-bit integer.
+		d2 = d1
+		for _, i := range rapid.SliceOfN(rapid.IntRange(0, DigestSize-1), 1, 8).Draw(t, "orBytes") {
+			d2[i] |= rapid.Byte().Draw(t, "orVal")
+		}
+		low, high := SelectF128(money, total, expected, d1), SelectF128(money, total, expected, d2)
+		if low > high {
+			t.Fatalf("monotonicity violated: SelectF128(d1)=%d > SelectF128(d2)=%d with d1 <= d2 (money=%d total=%d expected=%d d1=%x d2=%x)",
+				low, high, money, total, expected, d1, d2)
 		}
 	})
 }

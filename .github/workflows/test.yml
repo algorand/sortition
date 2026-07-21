@@ -20,3 +20,10 @@ jobs:
 
     - name: Test
       run: go test -v ./...
+
+    # Ordinary `go test` runs the rapid property tests at their default 100
+    # cases; run them again at a depth that reliably samples every generator
+    # band (the divU shallow-quotient bug reproduced within ~30 banded cases,
+    # so 20000 leaves ample margin while staying under a few seconds).
+    - name: Rapid property tests
+      run: go test -v -run TestRapid -rapid.checks=20000 ./...

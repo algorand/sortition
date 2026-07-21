@@ -305,6 +305,12 @@ func divStep(uHi, uMid, uLo, v1, v0 uint64) (q, rHi, rLo uint64) {
 	sMid, br := bits.Sub64(uMid, prodMid, br)
 	_, br = bits.Sub64(uHi, prodHi, br)
 	q = qhat
+	// Defense in depth: unlike Knuth's Algorithm D, which bounds the D3
+	// adjustment at two rounds and relies on this D6 add-back, the refine loop
+	// above runs to fixpoint with an exact 128-bit test (qhat*v0 <= rhat:uLo
+	// is equivalent to U - qhat*V >= 0 given rhat's bookkeeping), so qhat
+	// should already be exact and br always 0. Kept in case that analysis is
+	// wrong; an instrumented 3M-case search never fired it.
 	if br != 0 { // qhat was 1 too large: add the divisor back
 		q--
 		sLo, c = bits.Add64(sLo, v0, 0)

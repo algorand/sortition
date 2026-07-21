@@ -110,6 +110,34 @@ func FuzzSelectF128(f *testing.F) {
 	f.Add(uint64(100), uint64(1000), uint64(2000), make([]byte, 32)) // expectedSize > totalMoney
 	// all-0xff digest: ratio is exactly 1.0, the cdf-reaches-1.0 regime
 	f.Add(uint64(1954), uint64(1_999_999_999_999_964), uint64(1500), bytes.Repeat([]byte{0xff}, 32))
+	// fall-through to money by full walk (p=1/2: the pmf never drops below
+	// cum's half-ulp, so the CDF never freezes) and by the freeze short-circuit
+	// (tiny p: pmf underflows within a few steps); the second must equal the
+	// oracle's unshortened walk
+	f.Add(uint64(100), uint64(200), uint64(100), bytes.Repeat([]byte{0xff}, 32))
+	f.Add(uint64(1954), uint64(1_999_999_999_999_960), uint64(1500), bytes.Repeat([]byte{0xff}, 32))
+	// expectedSize > totalMoney with a nonzero digest: the degenerate path's money return
+	f.Add(uint64(100), uint64(1000), uint64(2000), bytes.Repeat([]byte{0xff}, 32))
+	// digest exactly halfway between ratio ulps: the denominator-correction
+	// round-up branch in f128FromDigestRatio, ~2^-128 density under mutation
+	halfway := make([]byte, DigestSize)
+	halfway[0], halfway[16] = 0x80, 0x80
+	f.Add(uint64(2000), uint64(4000), uint64(2000), halfway)
+	// tiny digest: the low-word normalization branch of the ratio conversion
+	tiny := make([]byte, DigestSize)
+	tiny[DigestSize-1] = 1
+	f.Add(uint64(1500), uint64(3000), uint64(1500), tiny)
+	mid := make([]byte, DigestSize)
+	mid[13] = 0x40 // leading zeros into the digest's third word
+	f.Add(uint64(1500), uint64(3000), uint64(1500), mid)
+	mid2 := make([]byte, DigestSize)
+	mid2[20] = 0x10 // leading zeros into the digest's second word
+	f.Add(uint64(1500), uint64(3000), uint64(1500), mid2)
+	// p just below 1: (1-p)^money exercises deep exponents; and extremes of
+	// total/expected magnitude the mutator will not reach from mid-range seeds
+	f.Add(uint64(2500), uint64(10_000_000_000_000_000), uint64(9_999_999_999_999_999), make([]byte, 32))
+	f.Add(uint64(3000), ^uint64(0), uint64(1), make([]byte, 32))
+	f.Add(uint64(7), uint64(0), uint64(0), make([]byte, 32)) // totalMoney == 0: degenerate nil path, zero ratio
 
 	// The uint64 expectedSize needs no input filtering: NaN/Inf/negative/
 	// fractional sizes are unrepresentable, and expectedSize >= totalMoney
@@ -302,6 +330,21 @@ func FuzzF128Ops(f *testing.F) {
 	// and missed divU's shallow-quotient misrounding (u > ~2^62).
 	f.Add(uint64(1)<<63|12345, uint64(67890), 3, uint64(1)<<63, uint64(1), 0, uint64(1)<<63|54321)
 	f.Add(uint64(1)<<63|999, uint64(777), -9, uint64(1)<<63, uint64(1), 0, uint64(5)<<61|33)
+	// For the same reason, each regime below gets its own seed. Exponents are
+	// encoded as E+2000 (the body maps aexp%4000-2000). Exact ties, carry-out
+	// renormalization, and the rare divStep branches have ~2^-64 density under
+	// uniform inputs; these vectors were constructed or mined by instrumented
+	// search and verified against big.Float:
+	f.Add(uint64(1)<<63, uint64(1), 2000, uint64(3)<<62, uint64(0), 2000, uint64(2))           // mul tail exactly half, odd mantissa: tie rounds up
+	f.Add(uint64(1)<<63, uint64(3), 2000, uint64(3)<<62, uint64(0), 2000, uint64(2))           // mul tie, even mantissa: ties to even
+	f.Add(^uint64(0), ^uint64(0), 2128, uint64(1)<<63, uint64(0), 2000, uint64(3))             // add tie at exp gap 128 into all-ones: carry renormalizes
+	f.Add(uint64(1)<<63, uint64(1), 2129, uint64(1)<<63, uint64(0), 2000, uint64(3))           // add exp gap 129: addend entirely below the round bit
+	f.Add(uint64(1)<<63, uint64(5), 2000, uint64(1)<<63, uint64(100), 2000, uint64(6))         // div: step remainder high word reaches v1 (qhat cap)
+	f.Add(uint64(1)<<63, uint64(1)<<63, 2000, uint64(1)<<63, uint64(1)<<63|2, 2000, uint64(6)) // div: qhat cap where rhat carries out
+	f.Add(uint64(0xff2432b605ae124e), uint64(0x7e0bcdcc481c2dbd), 2000,
+		uint64(0xa7c5c2e99ad4c9a0), uint64(0xd065b805fe1d2cf5), 2000, uint64(9)) // div: refine decrement hits the rhat overflow break
+	f.Add(uint64(0), uint64(12345), 2000, uint64(1), uint64(0), 2000, uint64(2)) // denormalized mantissas: norm128/shl128 paths
+	f.Add(uint64(1)<<63, uint64(0), 2000, uint64(0), uint64(0), 2000, uint64(5)) // zero second operand
 	f.Fuzz(func(t *testing.T, ahi, alo uint64, aexp int, bhi, blo uint64, bexp int, u uint64) {
 		a := norm128(ahi, alo, int64(aexp%4000-2000))
 		b := norm128(bhi, blo, int64(bexp%4000-2000))
