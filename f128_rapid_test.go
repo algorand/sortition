@@ -188,6 +188,85 @@ func TestRapidSelectF128ScaleInvariance(t *testing.T) {
 	})
 }
 
+// TestRapidSelectF128CommonFactorInvariance strengthens the power-of-two
+// property above. An arbitrary common factor changes the integer mantissas
+// presented to div, but preserves (T-E)/T and E/(T-E) exactly; both the
+// initialized distribution and final selection must therefore be identical.
+func TestRapidSelectF128CommonFactorInvariance(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		money := rapid.Uint64Range(0, 3000).Draw(t, "money")
+		factor := rapid.Uint64Range(2, 1<<20).Draw(t, "factor")
+		maxBase := ^uint64(0) / factor
+		if maxBase > 1_000_000_000_000_000 {
+			maxBase = 1_000_000_000_000_000
+		}
+		total := rapid.Uint64Range(1, maxBase).Draw(t, "total")
+		expected := rapid.Uint64Range(0, total).Draw(t, "expected")
+		var d Digest
+		copy(d[:], rapid.SliceOfN(rapid.Byte(), DigestSize, DigestSize).Draw(t, "vrf"))
+
+		baseDist := newBinomialF128(expected, total, money)
+		scaledDist := newBinomialF128(expected*factor, total*factor, money)
+		if (baseDist == nil) != (scaledDist == nil) {
+			t.Fatalf("common factor changed degenerate classification: T=%d E=%d k=%d", total, expected, factor)
+		}
+		if baseDist != nil && (baseDist.pq != scaledDist.pq || baseDist.pmf != scaledDist.pmf || baseDist.cum != scaledDist.cum) {
+			t.Fatalf("common factor changed initialized distribution: T=%d E=%d k=%d", total, expected, factor)
+		}
+		base := SelectF128(money, total, expected, d)
+		scaled := SelectF128(money, total*factor, expected*factor, d)
+		if base != scaled {
+			t.Fatalf("common-factor variance: SelectF128=%d but factor %d gives %d (money=%d total=%d expected=%d vrf=%x)",
+				base, factor, scaled, money, total, expected, d)
+		}
+	})
+}
+
+// TestRapidF128Metamorphic checks algebraic and order contracts without any
+// floating-point oracle. These overlap the exact-integer differential test on
+// purpose: corruption of either oracle cannot make an identity or monotonicity
+// failure disappear.
+func TestRapidF128Metamorphic(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		makeValue := func(label string) f128 {
+			return f128{
+				hi:  rapid.Uint64().Draw(t, label+"Hi") | 1<<63,
+				lo:  rapid.Uint64().Draw(t, label+"Lo"),
+				exp: rapid.Int64Range(-2000, 2000).Draw(t, label+"Exp"),
+			}
+		}
+		a, b, c, d := makeValue("a"), makeValue("b"), makeValue("c"), makeValue("d")
+		zero, one := f128{}, f128FromUint64(1)
+		if a.add(zero) != a || a.mul(one) != a || a.divU(1) != a || a.div(one) != a {
+			t.Fatalf("primitive identity failed for a=%+v", a)
+		}
+		if got := a.div(a); got != one {
+			t.Fatalf("self division=%+v, want one=%+v", got, one)
+		}
+		shift := rapid.Int64Range(-1000, 1000).Draw(t, "powerShift")
+		power := one
+		power.exp += shift
+		wantShift := a
+		wantShift.exp += shift
+		if got := a.mul(power); got != wantShift {
+			t.Fatalf("power-of-two shift=%+v, want %+v (a=%+v shift=%d)", got, wantShift, a, shift)
+		}
+
+		if a.cmp(b) > 0 {
+			a, b = b, a
+		}
+		if a.add(c).cmp(b.add(c)) > 0 || a.mul(c).cmp(b.mul(c)) > 0 || a.div(c).cmp(b.div(c)) > 0 {
+			t.Fatalf("numerator monotonicity failed: a=%+v b=%+v c=%+v", a, b, c)
+		}
+		if c.cmp(d) > 0 {
+			c, d = d, c
+		}
+		if a.div(c).cmp(a.div(d)) < 0 {
+			t.Fatalf("division denominator antitonicity failed: a=%+v c=%+v d=%+v", a, c, d)
+		}
+	})
+}
+
 // TestRapidSelectF128DigestMonotonic checks an ORACLE-INDEPENDENT property:
 // for fixed (money, total, expected), the selection count is non-decreasing in
 // the digest. This holds exactly -- the digest-to-ratio conversion is monotone

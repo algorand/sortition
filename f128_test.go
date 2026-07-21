@@ -23,6 +23,11 @@ import (
 	"testing"
 )
 
+// Test oracles only exercise committee-scale quantiles at large money. A
+// broken oracle must fail instead of attempting a supply-sized fall-through;
+// small-money exhaustive and fuzz cases remain allowed to walk to money.
+const testOracleMaxCDFSteps = uint64(20_000)
+
 // selectBigOracle is an independent, "obviously correct" reference for SelectF128:
 // the SAME binomial-CDF walk, but every arithmetic step uses math/big.Float (Go's
 // standard arbitrary-precision float, round-to-nearest-even) at the f128 mantissa
@@ -60,7 +65,7 @@ func selectBigOracle(money uint64, totalMoney uint64, expectedSize uint64, vrfOu
 	if cdf.Cmp(ratio) >= 0 {
 		return 0
 	}
-	for j := uint64(1); j < money; j++ {
+	for j := uint64(1); j < money && j <= testOracleMaxCDFSteps; j++ {
 		factor := new(big.Float).SetPrec(prec).Quo(
 			new(big.Float).SetPrec(prec).SetUint64(money-j+1),
 			new(big.Float).SetPrec(prec).SetUint64(j))
@@ -70,6 +75,9 @@ func selectBigOracle(money uint64, totalMoney uint64, expectedSize uint64, vrfOu
 		if cdf.Cmp(ratio) >= 0 {
 			return j
 		}
+	}
+	if money > testOracleMaxCDFSteps {
+		panic("selectBigOracle exceeded the test oracle step budget")
 	}
 	return money
 }

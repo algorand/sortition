@@ -30,11 +30,10 @@ import (
 // frozen-tail sliver, and must agree with the oracle bit-for-bit at
 // deliberately constructed knife-edge digests.
 
-// selectHighPrec runs the binomial-CDF walk at 512-bit precision with the
-// near-exact digest ratio. It is a reference for tolerance checking, not a
-// bit-identical mirror of SelectF128.
-func selectHighPrec(money, totalMoney, expectedSize uint64, vrfOutput Digest) uint64 {
-	const prec = 512
+// selectAtPrecision runs the binomial-CDF walk at the requested big.Float
+// precision. Multiple precisions are cross-checked below so the 512-bit
+// reference is not trusted merely because it has a larger mantissa.
+func selectAtPrecision(money, totalMoney, expectedSize uint64, vrfOutput Digest, prec uint) uint64 {
 	ratio := digestRatioBig(vrfOutput, prec)
 	if expectedSize >= totalMoney { // p >= 1
 		if ratio.Sign() <= 0 {
@@ -53,7 +52,7 @@ func selectHighPrec(money, totalMoney, expectedSize uint64, vrfOutput Digest) ui
 	if cdf.Cmp(ratio) >= 0 {
 		return 0
 	}
-	for j := uint64(1); j < money; j++ {
+	for j := uint64(1); j < money && j <= testOracleMaxCDFSteps; j++ {
 		factor := new(big.Float).SetPrec(prec).Quo(
 			new(big.Float).SetPrec(prec).SetUint64(money-j+1),
 			new(big.Float).SetPrec(prec).SetUint64(j))
@@ -63,7 +62,15 @@ func selectHighPrec(money, totalMoney, expectedSize uint64, vrfOutput Digest) ui
 			return j
 		}
 	}
+	if money > testOracleMaxCDFSteps {
+		panic("selectAtPrecision exceeded the test oracle step budget")
+	}
 	return money
+}
+
+// selectHighPrec runs the tolerance oracle at its ordinary 512-bit precision.
+func selectHighPrec(money, totalMoney, expectedSize uint64, vrfOutput Digest) uint64 {
+	return selectAtPrecision(money, totalMoney, expectedSize, vrfOutput, 512)
 }
 
 // inFrozenSliver reports whether the digest ratio is within the carved-out
@@ -239,6 +246,24 @@ func TestSelectF128VsExactRat(t *testing.T) {
 	}
 }
 
+// TestSelectF128ExactRatInclusiveBoundary constructs a digest ratio exactly
+// equal to CDF(0): for Binomial(1, 1/3), CDF(0)=2/3 and 3 divides 2^256-1.
+// Sampling cannot distinguish <= from < at this measure-zero boundary.
+func TestSelectF128ExactRatInclusiveBoundary(t *testing.T) {
+	den := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	at := new(big.Int).Quo(new(big.Int).Mul(new(big.Int).Set(den), big.NewInt(2)), big.NewInt(3))
+	if new(big.Int).Mod(new(big.Int).Set(den), big.NewInt(3)).Sign() != 0 {
+		t.Fatal("test construction requires 3 to divide 2^256-1")
+	}
+	for offset, want := range map[int64]uint64{-1: 0, 0: 0, 1: 1} {
+		point := new(big.Int).Add(new(big.Int).Set(at), big.NewInt(offset))
+		d := digestFromBigInt(t, point, den)
+		if got := selectExactRat(1, 3, 1, d); got != want {
+			t.Fatalf("offset %d: exact selector=%d, want %d", offset, got, want)
+		}
+	}
+}
+
 // TestSelectF128Distribution mirrors TestSortitionBasic for the pure-Go path:
 // summed selection weight over many digests must track N * money * p. This is
 // oracle-free AND formula-free -- a gross semantic error (wrong probability,
@@ -299,6 +324,7 @@ func TestSelectF128BoundaryStraddle(t *testing.T) {
 	rng := rand.New(rand.NewSource(8))
 	den := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 	denF := new(big.Float).SetPrec(600).SetInt(den)
+	var windows, bracketed, clampedWindows, candidates uint64
 
 	for iter := 0; iter < 150; iter++ {
 		money := 2 + rng.Uint64()%250
@@ -306,6 +332,7 @@ func TestSelectF128BoundaryStraddle(t *testing.T) {
 		expected := rng.Uint64() % total // p < 1
 		boundaries := []uint64{0, money / 2, money - 1, rng.Uint64() % money}
 		for _, j := range boundaries {
+			windows++
 			c := oracleCDFAt(money, total, expected, j)
 			// One f128 ulp at c's own magnitude, in digest units: the ulp is
 			// 2^(exp-128) for c in [2^(exp-1), 2^exp), so it scales with the
@@ -316,6 +343,14 @@ func TestSelectF128BoundaryStraddle(t *testing.T) {
 			step := new(big.Int).Rsh(den, uint(128-c.MantExp(nil)))
 			if step.Sign() == 0 {
 				step.SetInt64(1)
+			}
+			ulp := new(big.Float).SetMantExp(new(big.Float).SetPrec(600).SetInt64(1), c.MantExp(nil)-128)
+			wantStep, _ := new(big.Float).SetPrec(600).Mul(ulp, denF).Int(nil)
+			if wantStep.Sign() == 0 {
+				wantStep.SetInt64(1)
+			}
+			if step.Cmp(wantStep) != 0 {
+				t.Fatalf("straddle step %s is not one f128 ulp (%s) at boundary j=%d", step, wantStep, j)
 			}
 			tt, _ := new(big.Float).SetPrec(600).Mul(c, denF).Int(nil)
 			prev := uint64(0)
@@ -328,6 +363,7 @@ func TestSelectF128BoundaryStraddle(t *testing.T) {
 					clamped = true
 					continue
 				}
+				candidates++
 				var d Digest
 				ti.FillBytes(d[:])
 				got := SelectF128(money, total, expected, d)
@@ -354,6 +390,15 @@ func TestSelectF128BoundaryStraddle(t *testing.T) {
 				t.Fatalf("straddle window does not bracket boundary j=%d: [%v, %v] vs cdf=%v (money=%d total=%d expected=%d)",
 					j, loRatio, hiRatio, c, money, total, expected)
 			}
+			if clamped {
+				clampedWindows++
+			} else {
+				bracketed++
+			}
 		}
+	}
+	if windows != 600 || bracketed < 400 || candidates < 2_000 || bracketed+clampedWindows != windows {
+		t.Fatalf("anti-vacuity: windows=%d bracketed=%d clamped=%d candidates=%d",
+			windows, bracketed, clampedWindows, candidates)
 	}
 }

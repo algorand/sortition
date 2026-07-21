@@ -15,9 +15,15 @@ Setup and regenerate from the repository root:
     .venv-oracle/bin/pip install -r tools/requirements-oracle.txt
     .venv-oracle/bin/python tools/generate_arb_oracle.py \
         > testdata/f128_arb_certificates.json
+
+Verify the checked-in corpus without rewriting it:
+
+    .venv-oracle/bin/python tools/generate_arb_oracle.py \
+        --check testdata/f128_arb_certificates.json
 """
 
 import argparse
+import difflib
 import json
 import sys
 import time
@@ -164,7 +170,14 @@ def certify(case: Case, selected: int) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", help="generate only the case whose label contains this text")
+    parser.add_argument(
+        "--check",
+        metavar="PATH",
+        help="regenerate the full corpus and fail if its parsed JSON differs from PATH",
+    )
     args = parser.parse_args()
+    if args.case is not None and args.check is not None:
+        parser.error("--case and --check cannot be combined")
     cases = tuple(case for case in CASES if args.case is None or args.case in case.label)
     if not cases:
         parser.error("--case did not match any vector")
@@ -181,7 +194,31 @@ def main() -> None:
         "semantics": "exact binomial CDF; frozen-tail definition is tested separately",
         "vectors": vectors,
     }
-    print(json.dumps(output, indent=2, sort_keys=True))
+    rendered = json.dumps(output, indent=2, sort_keys=True)
+    if args.check is None:
+        print(rendered)
+        return
+
+    try:
+        with open(args.check, encoding="utf-8") as certificate_file:
+            committed = json.load(certificate_file)
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"cannot read certificate corpus {args.check}: {error}") from error
+    if committed != output:
+        committed_rendered = json.dumps(committed, indent=2, sort_keys=True)
+        print(
+            "".join(
+                difflib.unified_diff(
+                    committed_rendered.splitlines(keepends=True),
+                    rendered.splitlines(keepends=True),
+                    fromfile=args.check,
+                    tofile="fresh Arb generation",
+                )
+            ),
+            file=sys.stderr,
+        )
+        raise SystemExit("Arb certificate corpus is stale or non-reproducible")
+    print(f"verified {len(vectors)} Arb certificates against {args.check}", file=sys.stderr)
 
 
 if __name__ == "__main__":

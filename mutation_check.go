@@ -1,12 +1,12 @@
 //go:build ignore
 
-// mutation_check applies curated single-site mutants to f128.go and verifies
-// the fast test suite kills each one. Every mutant models a plausible
-// implementation bug (flipped rounding masks, dropped carries or sticky
-// terms, off-by-one boundaries, inverted ties); an UNEXPECTED survivor is a
-// test gap and must be answered with a new test. Mutants marked equivalent
-// encode a proof of why the mutation cannot change behavior; they are
-// expected to survive and exist to document that analysis.
+// mutation_check applies curated single-site mutants to f128.go and its test
+// oracles, then verifies the fast suite kills each one. Every mutant models a
+// plausible implementation or harness bug (flipped rounding masks, dropped
+// carries, wrong initialization, corrupt recurrence/boundary logic); an
+// UNEXPECTED survivor is a test gap and must be answered with a new test.
+// Mutants marked equivalent encode a proof of why the mutation cannot change
+// behavior; they are expected to survive and document that analysis.
 //
 // Run from the repo root:
 //
@@ -22,6 +22,7 @@ import (
 
 type mutant struct {
 	name       string
+	target     string // defaults to f128.go; test-oracle mutants name their file
 	old, new   string
 	equivalent string // non-empty: why this mutant is expected to survive
 }
@@ -53,7 +54,29 @@ var mutants = []mutant{
 		name: "ratio-sticky-drop-n0", old: "sticky := n1&^(uint64(1)<<63) != 0 || n0 != 0", new: "sticky := n1&^(uint64(1)<<63) != 0 || n0 > n0",
 		equivalent: "the halfway denominator-correction turns any roundBit-without-sticky into sticky, so n0's contribution is recreated exactly when it could matter, and sticky is irrelevant when roundBit is clear",
 	},
+	{name: "digest-little-endian", old: "w3 := binary.BigEndian.Uint64(d[0:8])", new: "w3 := binary.LittleEndian.Uint64(d[0:8])"},
+	{name: "intpow-invert-bit", old: "if e&1 == 1 {", new: "if e&1 == 0 {"},
+	{name: "intpow-wrong-square", old: "b = b.mul(b)", new: "b = b.mul(base)"},
+	{name: "distribution-degenerate-strict", old: "if expectedSize >= totalMoney { // p >= 1", new: "if expectedSize > totalMoney { // p >= 1"},
+	{
+		name: "distribution-q-numerator",
+		old:  "qf := f128FromUint64(totalMoney - expectedSize).div(f128FromUint64(totalMoney))   // 1-p",
+		new:  "qf := f128FromUint64(expectedSize).div(f128FromUint64(totalMoney))                // 1-p",
+	},
+	{
+		name: "distribution-pq-denominator",
+		old:  "pq := f128FromUint64(expectedSize).div(f128FromUint64(totalMoney - expectedSize)) // p/(1-p)",
+		new:  "pq := f128FromUint64(expectedSize).div(f128FromUint64(totalMoney))                // p/(1-p)",
+	},
+	{name: "distribution-pmf0-power", old: "pmf0 := qf.intPow(money)", new: "pmf0 := qf.intPow(money + 1)"},
+	{name: "distribution-cum-zero", old: "pmf: pmf0, cum: pmf0, at: 0", new: "pmf: pmf0, cum: f128{}, at: 0"},
+	{name: "cdf-skip-index", old: "b.at++", new: "b.at += 2"},
 	{name: "cdf-recurrence-off-by-one", old: "f128FromUint64(b.money - b.at + 1)", new: "f128FromUint64(b.money - b.at)"},
+	{
+		name: "walk-start-at-one",
+		old:  "for j := uint64(0); j < money; j++ {\n\t\tboundary := dist.cdf(j)",
+		new:  "for j := uint64(1); j < money; j++ {\n\t\tboundary := dist.cdf(j)",
+	},
 	{name: "walk-strict-compare", old: "P(X <= j)\n\t\tif ratio.cmp(boundary) <= 0 {", new: "P(X <= j)\n\t\tif ratio.cmp(boundary) < 0 {"},
 	{name: "freeze-fire-on-change", old: "if b.cum.cmp(cumPrev) == 0 && b.pmf.cmp(pmfPrev) < 0 {", new: "if b.cum.cmp(cumPrev) != 0 && b.pmf.cmp(pmfPrev) < 0 {"},
 	{
@@ -75,42 +98,115 @@ var mutants = []mutant{
 	{name: "fromuint64-exp", old: "return f128{u << uint(s), 0, -int64(s) - 64}", new: "return f128{u << uint(s), 0, -int64(s) - 63}"},
 	{name: "shl256-fill-shift", old: "out[i] |= in[src+1] >> (64 - shift)", new: "out[i] |= in[src+1] >> (63 - shift)"},
 	{name: "cmp-lo-invert", old: "if a.lo < b.lo {", new: "if a.lo > b.lo {"},
+
+	// Test the tests: corrupt each major in-process oracle independently. The
+	// exact-integer, exact-CDF, high-precision, Arb, metamorphic, and production
+	// layers should make these harness defects observable rather than allowing
+	// all references to agree with one another accidentally.
+	{
+		name:   "big-oracle-pmf0-power",
+		target: "f128_test.go",
+		old:    "pmf := bigIntPow(q, money, prec) // (1-p)^money",
+		new:    "pmf := bigIntPow(q, money+1, prec) // (1-p)^money",
+	},
+	{
+		name:   "big-oracle-recurrence-off-by-one",
+		target: "f128_test.go",
+		old:    "new(big.Float).SetPrec(prec).SetUint64(money-j+1),",
+		new:    "new(big.Float).SetPrec(prec).SetUint64(money-j),",
+	},
+	{
+		name:   "digest-oracle-denominator",
+		target: "f128_test.go",
+		old:    "denominator.Sub(denominator, big.NewInt(1))",
+		new:    "denominator.Sub(denominator, big.NewInt(2))",
+	},
+	{
+		name:   "highprec-oracle-recurrence-off-by-one",
+		target: "f128_exact_test.go",
+		old:    "new(big.Float).SetPrec(prec).SetUint64(money-j+1),",
+		new:    "new(big.Float).SetPrec(prec).SetUint64(money-j),",
+	},
+	{
+		name:   "frozen-sliver-invert",
+		target: "f128_exact_test.go",
+		old:    "return gap.Cmp(bound) < 0",
+		new:    "return gap.Cmp(bound) > 0",
+	},
+	{
+		name:   "exact-cdf-binomial-off-by-one",
+		target: "f128_exact_test.go",
+		old:    "term := new(big.Int).Binomial(int64(money), int64(i))",
+		new:    "term := new(big.Int).Binomial(int64(money-1), int64(i))",
+	},
+	{
+		name:   "exact-select-strict-boundary",
+		target: "f128_exact_test.go",
+		old:    "if lhs.Cmp(rhs) <= 0 {",
+		new:    "if lhs.Cmp(rhs) < 0 {",
+	},
+	{
+		name:   "straddle-wrong-ulp",
+		target: "f128_exact_test.go",
+		old:    "step := new(big.Int).Rsh(den, uint(128-c.MantExp(nil)))",
+		new:    "step := new(big.Int).Rsh(den, uint(127-c.MantExp(nil)))",
+	},
 }
 
 func main() {
-	const target = "f128.go"
-	orig, err := os.ReadFile(target)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	const defaultTarget = "f128.go"
+	originals := make(map[string][]byte)
+	for i := range mutants {
+		if mutants[i].target == "" {
+			mutants[i].target = defaultTarget
+		}
+		if _, ok := originals[mutants[i].target]; ok {
+			continue
+		}
+		orig, err := os.ReadFile(mutants[i].target)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		originals[mutants[i].target] = orig
 	}
-	restore := func() { os.WriteFile(target, orig, 0o644) }
-	defer restore()
+	restore := func(target string) {
+		if err := os.WriteFile(target, originals[target], 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "restore %s: %v\n", target, err)
+			os.Exit(1)
+		}
+	}
+	restoreAll := func() {
+		for target := range originals {
+			restore(target)
+		}
+	}
+	defer restoreAll()
 
 	killArgs := []string{
 		"test", "-count=1",
-		"-run", "TestF128Digest|TestF128Primitive|TestF128OpsExact|TestF128ConversionsExact|TestDivStepExact|TestDivUVsBig|TestDivVsBig|TestSelectF128|TestRapid|Fuzz",
+		"-run", "TestF128Digest|TestF128Primitive|TestF128OpsExact|TestF128ConversionsExact|TestDivStepExact|TestDivUVsBig|TestDivVsBig|TestSelectF128|TestSelectHighPrecision|TestRapid|Fuzz",
 		"-rapid.checks=2000",
 		// killed mutants fail the rapid tests by design; don't litter
 		// testdata/rapid with failfiles for them
 		"-rapid.nofailfile",
 	}
 
-	src := string(orig)
 	killed, expectedSurvivors := 0, 0
 	var unexpected []string
 	for _, m := range mutants {
+		src := string(originals[m.target])
 		if c := strings.Count(src, m.old); c != 1 {
-			restore()
-			fmt.Fprintf(os.Stderr, "mutant %s: target string occurs %d times, need exactly 1\n", m.name, c)
+			restoreAll()
+			fmt.Fprintf(os.Stderr, "mutant %s: target string occurs %d times in %s, need exactly 1\n", m.name, c, m.target)
 			os.Exit(1)
 		}
-		if err := os.WriteFile(target, []byte(strings.Replace(src, m.old, m.new, 1)), 0o644); err != nil {
+		if err := os.WriteFile(m.target, []byte(strings.Replace(src, m.old, m.new, 1)), 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		out, testErr := exec.Command("go", killArgs...).CombinedOutput()
-		restore()
+		restore(m.target)
 		if strings.Contains(string(out), "[build failed]") {
 			fmt.Fprintf(os.Stderr, "mutant %s: does not compile, fix the table\n%s\n", m.name, out)
 			os.Exit(1)

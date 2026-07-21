@@ -12,9 +12,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # Both architectures on each OS. TestGolden pins exact outputs, so a
-        # floating-point divergence in the cgo/Boost CDF between these targets
-        # shows up here as a failure rather than a silent consensus split.
+        # Both architectures on each OS. Exact-output tests pin both paths, so
+        # a floating-point divergence in the cgo/Boost CDF between these
+        # targets shows up as a failure rather than a silent consensus split.
         os:
           - ubuntu-latest    # linux/amd64
           - ubuntu-24.04-arm # linux/arm64
