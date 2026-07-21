@@ -164,6 +164,30 @@ func TestRapidSelectF128VsOracle(t *testing.T) {
 	})
 }
 
+// TestRapidSelectF128ScaleInvariance checks an ORACLE-INDEPENDENT exact
+// property: scaling totalMoney and expectedSize by a common power of two
+// leaves every rational in the walk identical -- the same quotients round to
+// the same 128-bit values -- so the result must be BIT-IDENTICAL. Unlike
+// tolerance-based metamorphic properties (monotonicity in p or money), this
+// cannot flake at knife edges, and it catches numerator/denominator
+// mishandling without consulting the oracle.
+func TestRapidSelectF128ScaleInvariance(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		money := rapid.Uint64Range(0, 3000).Draw(t, "money")
+		total := rapid.Uint64Range(0, 1<<40).Draw(t, "total")
+		expected := rapid.Uint64Range(0, 1<<40).Draw(t, "expected")
+		k := rapid.IntRange(1, 23).Draw(t, "k")
+		var d Digest
+		copy(d[:], rapid.SliceOfN(rapid.Byte(), DigestSize, DigestSize).Draw(t, "vrf"))
+		base := SelectF128(money, total, expected, d)
+		scaled := SelectF128(money, total<<k, expected<<k, d)
+		if base != scaled {
+			t.Fatalf("scale variance: SelectF128=%d but <<%d gives %d (money=%d total=%d expected=%d vrf=%x)",
+				base, k, scaled, money, total, expected, d)
+		}
+	})
+}
+
 // TestRapidSelectF128DigestMonotonic checks an ORACLE-INDEPENDENT property:
 // for fixed (money, total, expected), the selection count is non-decreasing in
 // the digest. This holds exactly -- the digest-to-ratio conversion is monotone

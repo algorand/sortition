@@ -250,6 +250,17 @@ func TestF128DigestRatioMatchesBigFloat(t *testing.T) {
 		cases = append(cases, d)
 	}
 
+	// Halfway tails whose sticky comes only from the lowest word: rounding up
+	// must come from the digest's own low bits, not the denominator
+	// correction.
+	for leading := 0; leading < 63; leading++ {
+		var d Digest
+		setBit(&d, DigestSize*8-1-leading)
+		setBit(&d, f128MantBits-1-leading)
+		setBit(&d, 0)
+		cases = append(cases, d)
+	}
+
 	var one Digest
 	one[len(one)-1] = 1
 	cases = append(cases, one)
@@ -380,10 +391,27 @@ func FuzzF128Ops(f *testing.F) {
 		uint64(0xa7c5c2e99ad4c9a0), uint64(0xd065b805fe1d2cf5), 2000, uint64(9)) // div: refine decrement hits the rhat overflow break
 	f.Add(uint64(0), uint64(12345), 2000, uint64(1), uint64(0), 2000, uint64(2)) // denormalized mantissas: norm128/shl128 paths
 	f.Add(uint64(1)<<63, uint64(0), 2000, uint64(0), uint64(0), 2000, uint64(5)) // zero second operand
+	// sticky carried ONLY by the term a mutation could drop (found by the
+	// mutation campaign in mutation_check.go): a mul tie broken only by p0,
+	// an add tie at gap 128 broken only by the addend's low word, and a divU
+	// tie broken only by the division remainder
+	f.Add(uint64(3)<<62|1, uint64(1), 2000, uint64(3)<<62-1, uint64(1), 2000, uint64(11))
+	f.Add(uint64(1)<<63, uint64(2), 2128, uint64(1)<<63, uint64(5), 2000, uint64(3))
+	f.Add(uint64(1)<<63, uint64(0), 2000, uint64(1)<<63, uint64(1), 2000, ^uint64(0))
 	f.Fuzz(func(t *testing.T, ahi, alo uint64, aexp int, bhi, blo uint64, bexp int, u uint64) {
 		a := norm128(ahi, alo, int64(aexp%4000-2000))
 		b := norm128(bhi, blo, int64(bexp%4000-2000))
 		ab, bb := f128ToBig(a), f128ToBig(b)
+		// norm128 is this harness's own input constructor, so nothing
+		// downstream would notice it corrupting the value (a mutation
+		// campaign caught exactly that); check it against the raw words.
+		raw := new(big.Float).SetPrec(300).SetUint64(ahi)
+		raw.SetMantExp(raw, 64)
+		raw.Add(raw, new(big.Float).SetPrec(300).SetUint64(alo))
+		raw.SetMantExp(raw, aexp%4000-2000)
+		if raw.Cmp(ab) != 0 {
+			t.Fatalf("norm128 changed the value: raw=%v normalized=%v (ahi=%#x alo=%#x)", raw, ab, ahi, alo)
+		}
 		check := func(name string, got f128, want *big.Float) {
 			gotBig := f128ToBig(got)
 			if gotBig.Cmp(want) != 0 {
