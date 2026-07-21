@@ -21,14 +21,11 @@ jobs:
           - macos-latest     # darwin/arm64
           - macos-15-intel   # darwin/amd64
           - windows-latest   # windows/amd64
-    defaults:
-      run:
-        shell: bash
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
 
     - name: Set up Go
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v7
 
     - name: Build
       run: go build -v ./...
@@ -54,10 +51,10 @@ jobs:
     name: Mutation campaign
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
 
     - name: Set up Go
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v7
 
     - name: Run mutation campaign
       run: go run mutation_check.go
