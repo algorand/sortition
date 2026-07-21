@@ -89,14 +89,24 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // f128 CDF happens to round up to exactly 1.0 at an earlier j (a rounding
 // artifact), in which case it returns that j. Both outcomes occur, decided
 // per-distribution at ulp granularity: the money=1954 case in
-// TestSelectF128RatioExactlyOne stops at j=3, while the same distribution with
-// total=2_000_000_000_000_000 falls through to money. Both match the 128-bit
-// big.Float oracle. Boost's double CDF -- evaluated independently per j via
-// ibetac rather than accumulated -- can also saturate to 1.0 on its far coarser
-// grid, potentially at a different (typically earlier) j, so the divergence
-// here can be as large as money vs. a few. Such inputs are cryptographically
-// unreachable (a VRF hash in the top 2^-129), so this is a documented property,
-// not a case worth special-casing.
+// TestSelectF128RatioExactlyOne stops at j=4, while the same distribution with
+// total=1_999_999_999_999_960 falls through to money. Both match the 128-bit
+// big.Float oracle.
+//
+// More generally, the accumulated CDF settles at a plateau within roughly
+// (walk length)*2^-129 of 1 -- pmf(0) is computed with 64 guard bits precisely
+// so the trial count cannot amplify its rounding onto that plateau (see f192)
+// -- so a digest ratio in the sliver between the plateau and 1.0 sits above
+// every boundary without rounding to 1.0. The walk detects the frozen CDF and
+// returns money immediately rather than stepping through up to money no-op
+// iterations. Boost's double CDF -- evaluated independently per j via ibetac
+// rather than accumulated -- can also saturate to 1.0 on its far coarser grid,
+// potentially at a different (typically earlier) j. At these near-maximum
+// digests the two implementations can therefore return wildly different
+// counts: one may stop within a few steps of the binomial tail while the other
+// returns the full trial count money. All such inputs are
+// cryptographically unreachable (a VRF hash within ~2^-116 of the maximum), so
+// this is a documented property, not a case worth special-casing further.
 func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
 	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)

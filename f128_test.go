@@ -49,13 +49,15 @@ func selectBigOracle(money uint64, totalMoney uint64, expectedSize uint64, vrfOu
 		}
 		return money
 	}
-	q := new(big.Float).SetPrec(prec).Quo(
-		new(big.Float).SetPrec(prec).SetUint64(totalMoney-expectedSize),
-		new(big.Float).SetPrec(prec).SetUint64(totalMoney))
 	pq := new(big.Float).SetPrec(prec).Quo(
 		new(big.Float).SetPrec(prec).SetUint64(expectedSize),
 		new(big.Float).SetPrec(prec).SetUint64(totalMoney-expectedSize))
-	pmf := bigIntPow(q, money, prec) // (1-p)^money
+	// pmf(0) = (1-p)^money is formed at 192-bit precision and rounded once to
+	// 128, mirroring the f192 path in newBinomialF128.
+	q := new(big.Float).SetPrec(192).Quo(
+		new(big.Float).SetPrec(192).SetUint64(totalMoney-expectedSize),
+		new(big.Float).SetPrec(192).SetUint64(totalMoney))
+	pmf := new(big.Float).SetPrec(prec).Set(bigIntPow(q, money, 192))
 	cdf := new(big.Float).SetPrec(prec).Set(pmf)
 	if cdf.Cmp(ratio) >= 0 {
 		return 0
@@ -242,17 +244,22 @@ func TestSelectF128NearMaximumDigest(t *testing.T) {
 // only when the accumulated f128 CDF happens to round up to exactly 1.0 (see
 // the SelectF128 doc comment). Each case pins one branch:
 //
-//   - money=1954 with total=1_999_999_999_999_964: stops early at j=3, while
-//     the same distribution with total=2_000_000_000_000_000 (36 more) falls
-//     through to money. A hair-trigger pair pinned together: if a rounding
-//     change flips either, the cdf trajectory moved by an ulp -- the walk did
-//     not break.
+//   - money=1954, exp=1500: with total=1_999_999_999_999_964 it stops early
+//     at j=4, while with total=1_999_999_999_999_960 (4 less) it falls through
+//     to money. A hair-trigger pair pinned together: if a rounding change
+//     flips either, the cdf trajectory moved by an ulp -- the walk did not
+//     break. (Computing pmf(0) at 192 bits did exactly that: the early stop
+//     was j=3 with a 128-bit pmf(0), and the fall-through twin was
+//     total=2_000_000_000_000_000.)
 //   - money=100, p=1/2: provably falls through to money -- cdf(99) is
 //     1 - 2^-100, which sits 2^28 ulps below 1.0, a gap no rounding can
 //     bridge.
 //   - money=129, p=1/2: the exact boundary -- true cdf(128) = 1 - 2^-129 is
 //     precisely the rounding midpoint, and ties-to-even rounds it up to
 //     exactly 1.0, stopping at j=128.
+//   - money == total == supply: the accumulated cdf reaches exactly 1.0 even
+//     at supply-sized money (j=2012), exercising the early-stop branch at the
+//     scale where the frozen-plateau tests below matter.
 func TestSelectF128RatioExactlyOne(t *testing.T) {
 	one := f128FromUint64(1)
 
@@ -271,10 +278,11 @@ func TestSelectF128RatioExactlyOne(t *testing.T) {
 		money, total, expected uint64
 		want                   uint64
 	}{
-		{1954, 1_999_999_999_999_964, 1500, 3},
-		{1954, 2_000_000_000_000_000, 1500, 1954},
+		{1954, 1_999_999_999_999_964, 1500, 4},
+		{1954, 1_999_999_999_999_960, 1500, 1954},
 		{100, 200, 100, 100},
 		{129, 258, 129, 128},
+		{2_000_000_000_000_000, 2_000_000_000_000_000, 1500, 2012},
 	}
 	for _, d := range []Digest{maximum, minLeadingOnes} {
 		if f128FromDigestRatio(d).cmp(one) != 0 {
@@ -381,5 +389,150 @@ func TestDivVsBig(t *testing.T) {
 		if got.Cmp(want) != 0 {
 			t.Fatalf("div mismatch: a=%+v b=%+v got=%s want=%s", a, b, got.Text('p', 0), want.Text('p', 0))
 		}
+	}
+}
+
+// checkF192Pow compares the f192 pipeline used for pmf(0) -- quotient at 192
+// bits, power by squaring at 192 bits, one rounding to f128 -- against the
+// identical computation in big.Float.
+func checkF192Pow(t *testing.T, n, d, e uint64) {
+	t.Helper()
+	got := f128ToBig(f192Quo(n, d).intPow(e).toF128())
+	q := new(big.Float).SetPrec(192).Quo(
+		new(big.Float).SetPrec(192).SetUint64(n),
+		new(big.Float).SetPrec(192).SetUint64(d))
+	want := new(big.Float).SetPrec(f128MantBits).Set(bigIntPow(q, e, 192))
+	if got.Cmp(want) != 0 {
+		t.Fatalf("f192 pow mismatch: n=%d d=%d e=%d got=%s want=%s",
+			n, d, e, got.Text('p', 0), want.Text('p', 0))
+	}
+}
+
+// TestF192PowVsBig validates the f192 quotient/multiply/power path against
+// 192-bit big.Float, including supply-sized exponents where the f128-precision
+// power previously amplified the base rounding by the trial count.
+func TestF192PowVsBig(t *testing.T) {
+	checkF192Pow(t, 1, 2, 129)
+	checkF192Pow(t, 1_999_999_999_998_500, 2_000_000_000_000_000, 2_000_000_000_000_000)
+	checkF192Pow(t, 1, 1<<63, 1)
+	checkF192Pow(t, (1<<64)-2, (1<<64)-1, 1<<32)
+	checkF192Pow(t, 7, 7, 1<<60) // n == d: exactly 1.0 at any power
+	rng := rand.New(rand.NewSource(4))
+	for i := 0; i < 20_000; i++ {
+		d := rng.Uint64()
+		if d < 2 {
+			continue
+		}
+		n := 1 + rng.Uint64()%d
+		e := rng.Uint64() >> uint(rng.Intn(64))
+		// keep e*log2(d/n) within big.Float's int32 exponent range so the
+		// reference cannot underflow to zero
+		if mean := float64(e) * float64(d-n) / float64(n); mean > 1e9 || float64(e)*64 > 4e18 {
+			continue
+		}
+		checkF192Pow(t, n, d, e)
+	}
+}
+
+// FuzzF192Pow is the fuzz form of TestF192PowVsBig. Run:
+//
+//	go test -run x -fuzz FuzzF192Pow
+func FuzzF192Pow(f *testing.F) {
+	f.Add(uint64(1_999_999_999_998_500), uint64(2_000_000_000_000_000), uint64(2_000_000_000_000_000))
+	f.Add(uint64(1), uint64(2), uint64(129))
+	f.Fuzz(func(t *testing.T, n, d, e uint64) {
+		if d == 0 || n == 0 || n > d {
+			return
+		}
+		if mean := float64(e) * float64(d-n) / float64(n); mean > 1e9 || float64(e)*64 > 4e18 {
+			return
+		}
+		checkF192Pow(t, n, d, e)
+	})
+}
+
+// TestSelectF128LargeMoneyTail pins the regression where pmf(0) computed at
+// f128 precision let the accumulated CDF plateau ~money*2^-129 below 1: for
+// money == totalMoney == 2e15 the plateau sat at ~1-2^-78, so this digest
+// (2^256-1-2^176, ratio ~1-2^-80) stayed above every boundary and the walk
+// ground through all 2e15 iterations before returning money. With the 192-bit
+// pmf(0) the walk crosses the binomial tail at j=1913, matching an independent
+// 512-bit computation of the exact crossing.
+func TestSelectF128LargeMoneyTail(t *testing.T) {
+	const supply = uint64(2_000_000_000_000_000)
+	var d Digest
+	for i := range d {
+		d[i] = 0xff
+	}
+	d[9] = 0xfe // clear bit 176: digest 2^256-1-2^176
+	got := SelectF128(supply, supply, 1500, d)
+	if want := selectBigOracle(supply, supply, 1500, d); got != want {
+		t.Fatalf("SelectF128=%d != oracle=%d", got, want)
+	}
+	if got != 1913 {
+		t.Fatalf("SelectF128=%d, want 1913 (the exact binomial-tail crossing)", got)
+	}
+}
+
+// TestSelectF128FrozenPlateauReturnsMoney pins the walk's stagnation
+// short-circuit at supply-sized money. When the accumulated CDF freezes at a
+// plateau below 1.0, a digest whose ratio lands between the plateau and the
+// round-to-1.0 threshold can never be crossed, and the plain walk would grind
+// through ~money no-op iterations (hours at supply scale) before returning
+// money; the short-circuit must return the same money immediately. The test
+// finds a distribution whose plateau is below 1.0 (not all are: at some
+// (money, size) the plateau rounds onto 1.0 and the stuck band is empty), then
+// derives a digest inside the stuck band from the observed plateau, so it
+// tracks any future rounding changes.
+func TestSelectF128FrozenPlateauReturnsMoney(t *testing.T) {
+	const supply = uint64(2_000_000_000_000_000)
+	one := f128FromUint64(1)
+
+	var size uint64
+	var plateau f128
+	for _, candidate := range []uint64{20, 1500, 2990, 6000, 19, 21, 1499, 1501, 2989, 2991, 5999, 6001} {
+		dist := newBinomialF128(candidate, supply, supply)
+		for j := uint64(0); ; j++ {
+			plateau = dist.cdf(j)
+			if dist.frozen {
+				break
+			}
+			if j == 1_000_000 {
+				t.Fatalf("size=%d: cdf did not freeze within 1e6 steps", candidate)
+			}
+		}
+		if plateau.cmp(one) < 0 {
+			size = candidate
+			break
+		}
+	}
+	if size == 0 {
+		t.Fatal("no candidate distribution froze below 1.0")
+	}
+
+	// Walk digests upward from the plateau by ~one ratio ulp (2^128 digest
+	// units) until the f128 ratio lands strictly inside the stuck band.
+	den := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	tt := new(big.Int)
+	new(big.Float).SetPrec(300).Mul(f128ToBig(plateau), new(big.Float).SetPrec(300).SetInt(den)).Int(tt)
+	step := new(big.Int).Lsh(big.NewInt(1), 128)
+	var d Digest
+	found := false
+	for i := 0; i < 4096 && !found; i++ {
+		tt.Add(tt, step)
+		b := tt.Bytes()
+		if len(b) > len(d) {
+			break
+		}
+		d = Digest{}
+		copy(d[len(d)-len(b):], b)
+		r := f128FromDigestRatio(d)
+		found = r.cmp(plateau) > 0 && r.cmp(one) < 0
+	}
+	if !found {
+		t.Fatalf("size=%d: no digest found in the stuck band above the plateau", size)
+	}
+	if got := SelectF128(supply, supply, size, d); got != supply {
+		t.Fatalf("size=%d digest=%x: SelectF128=%d, want money=%d", size, d, got, supply)
 	}
 }

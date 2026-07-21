@@ -437,9 +437,128 @@ func (a f128) cmp(b f128) int {
 	return 0
 }
 
+// f192 is a 192-bit-mantissa float used ONLY to form pmf(0) = (1-p)^money in
+// newBinomialF128. Raising to the money-th power amplifies the relative
+// rounding error of the base by up to money (~2^51 when money is the whole
+// supply), so computing the power at f128 precision would put ~money*2^-129 of
+// error on pmf(0) -- and, since pmf(0) is a common factor of every PMF term,
+// the accumulated CDF would plateau as far as money*2^-129 below 1, a band of
+// valid near-maximum ratios the walk could then never cross. The 64 guard bits
+// absorb the amplification (money*2^-193 < 2^-129), so the result rounded to
+// f128 is dominated by its own final rounding. Conventions match f128:
+// value = (hi:mid:lo) * 2^exp, bit 191 set, round-to-nearest-even
+// (bit-identical to a 192-bit big.Float, which the test oracle mirrors).
+type f192 struct {
+	hi, mid, lo uint64
+	exp         int
+}
+
+// roundNE192 is roundNE for a 192-bit mantissa: round to nearest, ties to
+// even, renormalizing on mantissa overflow. hi:mid:lo must be normalized.
+func roundNE192(hi, mid, lo uint64, roundBit, sticky bool, exp int) f192 {
+	if roundBit && (sticky || lo&1 != 0) {
+		var c uint64
+		lo, c = bits.Add64(lo, 1, 0)
+		mid, c = bits.Add64(mid, 0, c)
+		hi, c = bits.Add64(hi, 0, c)
+		if c != 0 { // mantissa overflowed to 2^192 -> renormalize to 2^191
+			return f192{1 << 63, 0, 0, exp + 1}
+		}
+	}
+	return f192{hi, mid, lo, exp}
+}
+
+// f192Quo returns n/d rounded to nearest even at 192 bits, for 1 <= n <= d
+// (the recurrence's 1-p = (totalMoney-expectedSize)/totalMoney).
+func f192Quo(n, d uint64) f192 {
+	if n == d {
+		return f192{1 << 63, 0, 0, -191} // exactly 1.0
+	}
+	// 256 fraction bits of n/d by long division (n < d keeps each quotient
+	// digit under 2^64); the final remainder marks sticky.
+	w1, r := bits.Div64(n, 0, d)
+	w2, r := bits.Div64(r, 0, d)
+	w3, r := bits.Div64(r, 0, d)
+	w4, r := bits.Div64(r, 0, d)
+	var lz int
+	switch {
+	case w1 != 0:
+		lz = bits.LeadingZeros64(w1)
+	case w2 != 0:
+		lz = 64 + bits.LeadingZeros64(w2)
+	case w3 != 0:
+		lz = 128 + bits.LeadingZeros64(w3)
+	default:
+		lz = 192 + bits.LeadingZeros64(w4)
+	}
+	o3, o2, o1, o0 := shl256(w1, w2, w3, w4, uint(lz))
+	round := o0&(uint64(1)<<63) != 0
+	sticky := o0&^(uint64(1)<<63) != 0 || r != 0
+	return roundNE192(o3, o2, o1, round, sticky, -192-lz)
+}
+
+// mul returns a*b rounded to nearest even (operands normalized and nonzero).
+// The 384-bit product is assembled from the nine 64x64 partials by column,
+// then normalized exactly as in f128.mul.
+func (a f192) mul(b f192) f192 {
+	h22, l22 := bits.Mul64(a.hi, b.hi)
+	h21, l21 := bits.Mul64(a.hi, b.mid)
+	h12, l12 := bits.Mul64(a.mid, b.hi)
+	h20, l20 := bits.Mul64(a.hi, b.lo)
+	h02, l02 := bits.Mul64(a.lo, b.hi)
+	h11, l11 := bits.Mul64(a.mid, b.mid)
+	h10, l10 := bits.Mul64(a.mid, b.lo)
+	h01, l01 := bits.Mul64(a.lo, b.mid)
+	h00, l00 := bits.Mul64(a.lo, b.lo)
+	p0 := l00
+	p1, c := bits.Add64(h00, l01, 0)
+	c1 := c
+	p1, c = bits.Add64(p1, l10, 0)
+	c1 += c
+	p2, c := bits.Add64(h01, h10, 0)
+	c2 := c
+	p2, c = bits.Add64(p2, l11, 0)
+	c2 += c
+	p2, c = bits.Add64(p2, l02, 0)
+	c2 += c
+	p2, c = bits.Add64(p2, l20, 0)
+	c2 += c
+	p2, c = bits.Add64(p2, c1, 0)
+	c2 += c
+	p3, c := bits.Add64(h11, h02, 0)
+	c3 := c
+	p3, c = bits.Add64(p3, h20, 0)
+	c3 += c
+	p3, c = bits.Add64(p3, l12, 0)
+	c3 += c
+	p3, c = bits.Add64(p3, l21, 0)
+	c3 += c
+	p3, c = bits.Add64(p3, c2, 0)
+	c3 += c
+	p4, c := bits.Add64(h12, h21, 0)
+	c4 := c
+	p4, c = bits.Add64(p4, l22, 0)
+	c4 += c
+	p4, c = bits.Add64(p4, c3, 0)
+	c4 += c
+	p5 := h22 + c4
+	if p5&(uint64(1)<<63) != 0 { // product >= 2^383: mantissa p5:p4:p3, tail p2:p1:p0
+		round := p2&(uint64(1)<<63) != 0
+		sticky := p2&^(uint64(1)<<63) != 0 || p1 != 0 || p0 != 0
+		return roundNE192(p5, p4, p3, round, sticky, a.exp+b.exp+192)
+	}
+	// product in [2^382, 2^383): shift left 1 to normalize
+	hi := p5<<1 | p4>>63
+	mid := p4<<1 | p3>>63
+	lo := p3<<1 | p2>>63
+	round := p2&(uint64(1)<<62) != 0
+	sticky := p2&^(uint64(3)<<62) != 0 || p1 != 0 || p0 != 0
+	return roundNE192(hi, mid, lo, round, sticky, a.exp+b.exp+191)
+}
+
 // intPow returns base^e by exponentiation by squaring (integer exponent).
-func (base f128) intPow(e uint64) f128 {
-	result := f128FromUint64(1)
+func (base f192) intPow(e uint64) f192 {
+	result := f192{1 << 63, 0, 0, -191} // 1.0
 	b := base
 	for e > 0 {
 		if e&1 == 1 {
@@ -451,6 +570,13 @@ func (base f128) intPow(e uint64) f128 {
 		}
 	}
 	return result
+}
+
+// toF128 drops the 64 guard bits, rounding to nearest even.
+func (a f192) toF128() f128 {
+	round := a.lo&(uint64(1)<<63) != 0
+	sticky := a.lo&^(uint64(1)<<63) != 0
+	return roundNE(a.hi, a.mid, round, sticky, a.exp+64)
 }
 
 // binomialF128 evaluates the CDF of Binomial(money trials, success probability p)
@@ -466,43 +592,54 @@ func (base f128) intPow(e uint64) f128 {
 // below does); each call advances the running PMF/CDF using only f128 software
 // arithmetic, so cdf(j) is bit-reproducible on every platform.
 type binomialF128 struct {
-	money uint64
-	pq    f128   // p/(1-p), the per-step PMF multiplier
-	pmf   f128   // pmf(at): the current term
-	cum   f128   // cdf(at) = P(X <= at)
-	at    uint64 // index that pmf/cum currently hold
+	money  uint64
+	pq     f128   // p/(1-p), the per-step PMF multiplier
+	pmf    f128   // pmf(at): the current term
+	cum    f128   // cdf(at) = P(X <= at)
+	at     uint64 // index that pmf/cum currently hold
+	frozen bool   // cum can never change again: cdf(k) == cum for every k >= at
 }
 
 // newBinomialF128 constructs the CDF evaluator for Binomial(money trials,
 // p = expectedSize/totalMoney) -- the analogue of constructing
 // binomial_distribution<double>(n=money, p). Taking p as its exact integer
-// numerator and denominator lets each PMF-recurrence constant be a SINGLE
-// round-to-nearest-even f128 divide of exact values:
+// numerator and denominator lets each PMF-recurrence constant be formed from
+// exact values, never through an intermediate float64 p (whose
+// float64(totalMoney) conversion is itself inexact above 2^53):
 //
-//	1-p     = (totalMoney-expectedSize) / totalMoney
-//	p/(1-p) = expectedSize / (totalMoney-expectedSize)
+//	p/(1-p) = expectedSize / (totalMoney-expectedSize)     one f128 divide
+//	pmf(0)  = ((totalMoney-expectedSize)/totalMoney)^money computed in f192,
+//	          rounded once to f128 (see f192 for why the power needs 64
+//	          guard bits)
 //
-// rather than stacking roundings through an intermediate float64 p (whose
-// float64(totalMoney) conversion is itself inexact above 2^53). Returns nil for
-// the degenerate p >= 1 -- expectedSize >= totalMoney, an exact integer
-// comparison; all probability mass at j == money -- which the caller handles.
-// totalMoney == 0 also lands on the nil path.
+// Returns nil for the degenerate p >= 1 -- expectedSize >= totalMoney, an
+// exact integer comparison; all probability mass at j == money -- which the
+// caller handles. totalMoney == 0 also lands on the nil path.
 func newBinomialF128(expectedSize, totalMoney, money uint64) *binomialF128 {
 	if expectedSize >= totalMoney { // p >= 1
 		return nil
 	}
-	qf := f128FromUint64(totalMoney - expectedSize).div(f128FromUint64(totalMoney))   // 1-p
-	pq := f128FromUint64(expectedSize).div(f128FromUint64(totalMoney - expectedSize)) // p/(1-p)
-	pmf0 := qf.intPow(money)                                                          // (1-p)^money
+	pq := f128FromUint64(expectedSize).div(f128FromUint64(totalMoney - expectedSize))
+	pmf0 := f192Quo(totalMoney-expectedSize, totalMoney).intPow(money).toF128()
 	return &binomialF128{money: money, pq: pq, pmf: pmf0, cum: pmf0, at: 0}
 }
 
 func (b *binomialF128) cdf(j uint64) f128 {
-	for b.at < j {
+	for b.at < j && !b.frozen {
 		b.at++
 		// pmf(at) = pmf(at-1) * (money-at+1)/at * p/(1-p)
+		pmfPrev := b.pmf
 		b.pmf = f128FromUint64(b.money - b.at + 1).divU(b.at).mul(b.pq).mul(b.pmf)
+		cumPrev := b.cum
 		b.cum = b.cum.add(b.pmf)
+		// cum is frozen once an add is a no-op while pmf strictly shrank: a
+		// shrinking pmf proves the rounded step factor is < 1, and the factor
+		// only decreases with at (round-to-nearest is monotone), so every later
+		// pmf is <= this one; and if adding THIS pmf could not move cum, no
+		// later, smaller pmf can either. From here cdf(k) == cum for all k.
+		if b.cum.cmp(cumPrev) == 0 && b.pmf.cmp(pmfPrev) < 0 {
+			b.frozen = true
+		}
 	}
 	return b.cum
 }
@@ -551,6 +688,14 @@ func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint
 		boundary := dist.cdf(j) // = cdf(dist, j) = P(X <= j)
 		if ratio.cmp(boundary) <= 0 {
 			return j
+		}
+		if dist.frozen {
+			// The boundary can never increase again, so no remaining j can be
+			// selected: return the result the full walk would reach, without
+			// stepping through the up-to-money no-op iterations (for a
+			// near-maximum ratio above the CDF's plateau that walk could
+			// otherwise take hours at supply-sized money).
+			return money
 		}
 	}
 	return money
