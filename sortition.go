@@ -93,10 +93,12 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // total=2_000_000_000_000_000 falls through to money. Both match the 128-bit
 // big.Float oracle. Boost's double CDF -- evaluated independently per j via
 // ibetac rather than accumulated -- can also saturate to 1.0 on its far coarser
-// grid, potentially at a different (typically earlier) j, so the divergence
-// here can be as large as money vs. a few. Such inputs are cryptographically
-// unreachable (a VRF hash in the top 2^-129), so this is a documented property,
-// not a case worth special-casing.
+// grid, potentially at a different (typically earlier) j. At these near-maximum
+// digests the two implementations can therefore return wildly different counts:
+// one may stop within a few steps of the binomial tail while the other returns
+// the full trial count money. Such inputs are cryptographically unreachable (a
+// VRF hash in the top 2^-129), so this is a documented property, not a case
+// worth special-casing.
 func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
 	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)
