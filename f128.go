@@ -471,6 +471,8 @@ type binomialF128 struct {
 	pmf   f128   // pmf(at): the current term
 	cum   f128   // cdf(at) = P(X <= at)
 	at    uint64 // index that pmf/cum currently hold
+
+	frozen bool // cum can never change again: cdf(k) == cum for every k >= at
 }
 
 // newBinomialF128 constructs the CDF evaluator for Binomial(money trials,
@@ -483,10 +485,14 @@ type binomialF128 struct {
 //	p/(1-p) = expectedSize / (totalMoney-expectedSize)
 //
 // rather than stacking roundings through an intermediate float64 p (whose
-// float64(totalMoney) conversion is itself inexact above 2^53). Returns nil for
-// the degenerate p >= 1 -- expectedSize >= totalMoney, an exact integer
-// comparison; all probability mass at j == money -- which the caller handles.
-// totalMoney == 0 also lands on the nil path.
+// float64(totalMoney) conversion is itself inexact above 2^53). Note that
+// intPow then amplifies qf's single rounding by up to the trial count, so
+// pmf(0) carries ~money*2^-129 of relative error; the SelectF128 tail-edge
+// note documents the resulting CDF plateau and how the walk's freeze
+// detection handles it. Returns nil for the degenerate p >= 1 --
+// expectedSize >= totalMoney, an exact integer comparison; all probability
+// mass at j == money -- which the caller handles. totalMoney == 0 also lands
+// on the nil path.
 func newBinomialF128(expectedSize, totalMoney, money uint64) *binomialF128 {
 	if expectedSize >= totalMoney { // p >= 1
 		return nil
@@ -498,11 +504,21 @@ func newBinomialF128(expectedSize, totalMoney, money uint64) *binomialF128 {
 }
 
 func (b *binomialF128) cdf(j uint64) f128 {
-	for b.at < j {
+	for b.at < j && !b.frozen {
 		b.at++
 		// pmf(at) = pmf(at-1) * (money-at+1)/at * p/(1-p)
+		pmfPrev := b.pmf
 		b.pmf = f128FromUint64(b.money - b.at + 1).divU(b.at).mul(b.pq).mul(b.pmf)
+		cumPrev := b.cum
 		b.cum = b.cum.add(b.pmf)
+		// cum is frozen once an add is a no-op while pmf strictly shrank: a
+		// shrinking pmf proves the rounded step factor is < 1, and the factor
+		// only decreases with at (round-to-nearest is monotone), so every later
+		// pmf is <= this one; and if adding THIS pmf could not move cum, no
+		// later, smaller pmf can either. From here cdf(k) == cum for all k.
+		if b.cum.cmp(cumPrev) == 0 && b.pmf.cmp(pmfPrev) < 0 {
+			b.frozen = true
+		}
 	}
 	return b.cum
 }
@@ -551,6 +567,14 @@ func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint
 		boundary := dist.cdf(j) // = cdf(dist, j) = P(X <= j)
 		if ratio.cmp(boundary) <= 0 {
 			return j
+		}
+		if dist.frozen {
+			// The boundary can never increase again, so no remaining j can be
+			// selected: return the result the full walk would reach, without
+			// stepping through the up-to-money no-op iterations (for a
+			// near-maximum ratio above the CDF's plateau that walk could
+			// otherwise take hours at supply-sized money).
+			return money
 		}
 	}
 	return money

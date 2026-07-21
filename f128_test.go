@@ -383,3 +383,36 @@ func TestDivVsBig(t *testing.T) {
 		}
 	}
 }
+
+// TestSelectF128FrozenTailReturnsMoney pins the walk's stagnation
+// short-circuit and the documented stuck-band count at supply-sized money.
+// pmf(0)'s trial-count-amplified rounding leaves the accumulated CDF at a
+// plateau ~2^-78 below 1 for money == totalMoney == 2e15, so this digest
+// (2^256-1-2^176, ratio ~1-2^-80) sits above every boundary: the plain walk
+// would grind through all 2e15 no-op iterations (hours) before returning
+// money. The short-circuit must return the same money immediately -- this
+// test completing at all is the liveness assertion. The oracle is not
+// consulted here because it has no short-circuit and would walk the full 2e15
+// steps; FuzzSelectF128 continuously validates short-circuit == full walk at
+// fuzzable money, where the oracle does complete, as do the fall-through
+// cases in TestSelectF128RatioExactlyOne.
+func TestSelectF128FrozenTailReturnsMoney(t *testing.T) {
+	const supply = uint64(2_000_000_000_000_000)
+	var d Digest
+	for i := range d {
+		d[i] = 0xff
+	}
+	d[9] = 0xfe // clear bit 176: digest 2^256-1-2^176, ratio ~= 1 - 2^-80
+	if got := SelectF128(supply, supply, 1500, d); got != supply {
+		t.Fatalf("SelectF128=%d, want money=%d for a ratio above the CDF plateau", got, supply)
+	}
+
+	// The all-0xff digest (ratio exactly 1.0) is also above this
+	// distribution's plateau and must take the same frozen path.
+	for i := range d {
+		d[i] = 0xff
+	}
+	if got := SelectF128(supply, supply, 1500, d); got != supply {
+		t.Fatalf("SelectF128=%d, want money=%d for ratio exactly 1.0 at supply-sized money", got, supply)
+	}
+}

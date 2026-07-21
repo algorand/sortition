@@ -99,6 +99,21 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // the full trial count money. Such inputs are cryptographically unreachable (a
 // VRF hash in the top 2^-129), so this is a documented property, not a case
 // worth special-casing.
+//
+// The same holds in a wider sliver just below 1.0. pmf(0) = (1-p)^money
+// amplifies the 2^-129 rounding of 1-p by up to the trial count, and pmf(0)
+// scales every PMF term, so the accumulated CDF settles at a plateau that can
+// sit as much as ~money*2^-129 below 1 (~2^-78 when money is the whole
+// supply). A digest ratio between that plateau and 1.0 sits above every
+// boundary without rounding to 1.0; the walk detects the frozen CDF and
+// immediately returns money, the same result the plain walk would reach after
+// up to money no-op iterations (hours at supply-sized money). Reaching the
+// sliver requires a VRF hash within ~2^-78 of the maximum, which cannot be
+// ground for -- the output is fixed by the registered key and seed -- so the
+// count there is DEFINED as money rather than the exact binomial-tail
+// crossing. (Computing pmf(0) with 64 guard bits would shrink the sliver to
+// ~2^-116 and make it return the tail crossing; that variant lives on the
+// sortition-f128-pmf192 branch if the trade is ever wanted.)
 func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
 	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)
