@@ -58,39 +58,22 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 	return uint64(C.sortition_binomial_cdf_walk(C.double(binomialN), C.double(binomialP), C.double(cratio), C.uint64_t(money)))
 }
 
-// SelectF128 is a pure-Go, cgo-free, deterministic equivalent of Select. Compare
-// it line-by-line with Select above: the two function bodies are IDENTICAL except
-// the final call -- where Select invokes the C++ sortition_binomial_cdf_walk
-// (Boost, hardware double), SelectF128 invokes binomialCDFWalkF128 (software
-// f128, see f128.go). Both perform the same binomial-CDF walk; SelectF128's result
-// is additionally bit-reproducible on every platform/toolchain (no libm, no FMA,
-// no hardware floating point).
+// SelectF128 is a deterministic sortition function. It evaluates both the VRF
+// ratio and binomial CDF at f128 precision using software integer arithmetic, so
+// its result is bit-reproducible across platforms.
 //
-// CONSENSUS / MIGRATION NOTE. SelectF128 is bit-reproducible but NOT bit-identical
-// to the Boost-double Select. They agree on the overwhelming majority of inputs
-// (see TestF128AgreesWithCurrent) but differ at knife-edge VRF outputs -- ratios
-// within ~2^-53 of a CDF boundary, including a VRF whose ratio rounds to exactly
-// 1.0, where the gap can exceed 1. Each difference is a different committee
-// selection, so swapping Select -> SelectF128 in production is a protocol-gated,
-// network-coordinated consensus change, never a drop-in: a node on SelectF128
-// while peers run Boost would fork at those inputs. At such edges SelectF128
-// returns the correctly-rounded (128-bit) count; the divergence is exactly the
-// libm/double last-bit non-determinism that f128 removes.
+// CONSENSUS / MIGRATION NOTE. SelectF128 is not bit-identical to the deployed
+// Boost-double Select. They agree on the overwhelming majority of inputs but can
+// differ at knife-edge VRF outputs near a CDF boundary. SelectF128 also preserves
+// the digest ratio at f128 precision instead of first rounding it to float64;
+// this avoids the multi-step tail divergence when a near-maximum digest rounds
+// to 1.0 in float64. Generic CDF-boundary differences can still change a
+// selection by one, so replacing Select with SelectF128 remains a protocol-gated,
+// network-coordinated consensus change.
 func SelectF128(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Digest) uint64 {
-	binomialN := float64(money)
 	binomialP := expectedSize / float64(totalMoney)
-
-	t := &big.Int{}
-	t.SetBytes(vrfOutput[:])
-
-	h := big.Float{}
-	h.SetPrec(precision)
-	h.SetInt(t)
-
-	ratio := big.Float{}
-	cratio, _ := ratio.Quo(&h, maxFloat).Float64()
-
-	return binomialCDFWalkF128(binomialN, binomialP, cratio, money)
+	ratio := f128FromDigestRatio(vrfOutput)
+	return binomialCDFWalkF128(binomialP, ratio, money)
 }
 
 func init() {

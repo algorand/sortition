@@ -17,7 +17,7 @@
 package sortition
 
 import (
-	"math"
+	"encoding/binary"
 	"math/big"
 	"math/bits"
 )
@@ -33,10 +33,7 @@ import (
 // The 128-bit mantissa is normalized so bit 127 (the MSB of hi) is set, or the
 // value is zero (hi==lo==0). All sortition quantities (p, 1-p, ratio, pmf, cdf,
 // factors) are >= 0, so there is no sign bit. Arithmetic ROUNDS TO NEAREST, TIES
-// TO EVEN (matching math/big.Float). Round-to-nearest is required, not merely
-// nicer: a VRF near the maximum makes the ratio round to exactly 1.0, and only
-// round-to-nearest lets the accumulated cdf reach 1.0 (truncation asymptotes just
-// below it and the walk runs to `money`).
+// TO EVEN (matching math/big.Float).
 type f128 struct {
 	hi, lo uint64
 	exp    int
@@ -117,6 +114,25 @@ func shl192(a2, a1, a0 uint64, n uint) (uint64, uint64, uint64) {
 	}
 }
 
+// shl256 shifts a 256-bit value (a3:a2:a1:a0) left by n < 256.
+func shl256(a3, a2, a1, a0 uint64, n uint) (uint64, uint64, uint64, uint64) {
+	words := n / 64
+	shift := n % 64
+	in := [4]uint64{a3, a2, a1, a0}
+	var out [4]uint64
+	for i := 0; i < 4; i++ {
+		src := i + int(words)
+		if src >= len(in) {
+			break
+		}
+		out[i] = in[src] << shift
+		if shift != 0 && src+1 < len(in) {
+			out[i] |= in[src+1] >> (64 - shift)
+		}
+	}
+	return out[0], out[1], out[2], out[3]
+}
+
 // norm128 normalizes a 128-bit mantissa (shifts MSB to bit 127). No bits are
 // dropped, so no rounding is needed; used for exact conversions.
 func norm128(hi, lo uint64, exp int) f128 {
@@ -180,21 +196,43 @@ func f128FromUint64(u uint64) f128 {
 	return f128{u << uint(s), 0, -(s + 64)}
 }
 
-func f128FromFloat64(f float64) f128 {
-	if f <= 0 {
+// f128FromDigestRatio returns digest/(2^256-1), rounded to nearest-even at
+// f128 precision, without reducing the digest to float64 first.
+func f128FromDigestRatio(d Digest) f128 {
+	w3 := binary.BigEndian.Uint64(d[0:8])
+	w2 := binary.BigEndian.Uint64(d[8:16])
+	w1 := binary.BigEndian.Uint64(d[16:24])
+	w0 := binary.BigEndian.Uint64(d[24:32])
+
+	var leading int
+	switch {
+	case w3 != 0:
+		leading = bits.LeadingZeros64(w3)
+	case w2 != 0:
+		leading = 64 + bits.LeadingZeros64(w2)
+	case w1 != 0:
+		leading = 128 + bits.LeadingZeros64(w1)
+	case w0 != 0:
+		leading = 192 + bits.LeadingZeros64(w0)
+	default:
 		return f128{}
 	}
-	b := math.Float64bits(f)
-	mant := b & (1<<52 - 1)
-	exp := int((b >> 52) & 0x7ff)
-	if exp == 0 { // subnormal: value = mant * 2^-1074
-		return norm128(0, mant, -1074)
+
+	n3, n2, n1, n0 := shl256(w3, w2, w1, w0, uint(leading))
+	roundBit := n1&(uint64(1)<<63) != 0
+	sticky := n1&^(uint64(1)<<63) != 0 || n0 != 0
+
+	// Dividing by 2^256 places the binary point directly after the digest.
+	// The real denominator is one smaller, so the exact ratio is slightly
+	// larger. That correction is at most one discarded-bit unit and changes
+	// rounding only when the 2^256 quotient is exactly halfway.
+	if roundBit && !sticky {
+		sticky = true
 	}
-	// normal: significand (mant|2^52) in [2^52,2^53); MSB (bit 52) -> bit 127.
-	return f128{(mant | 1<<52) << 11, 0, exp - 1150}
+	return roundNE(n3, n2, roundBit, sticky, -128-leading)
 }
 
-var f128bigMask = new(big.Int).SetUint64(math.MaxUint64)
+var f128bigMask = new(big.Int).SetUint64(^uint64(0))
 
 // f128FromBigFloat converts a (one-time, setup) big.Float constant to f128,
 // rounding to nearest even at 128 bits (so it matches a 128-bit big.Float).
@@ -386,30 +424,28 @@ func (b *binomialF128) cdf(j uint64) f128 {
 }
 
 // binomialCDFWalkF128 is the pure-Go, deterministic counterpart of the C++
-// sortition_binomial_cdf_walk in sortition.cpp. It has the SAME signature and the
-// SAME walk -- place the two side by side:
+// sortition_binomial_cdf_walk in sortition.cpp. It performs the same boundary
+// walk, using an f128 ratio and f128 CDF values:
 //
 //	C++  sortition.cpp                            Go  this function
 //	------------------------------------------    -------------------------------------------
 //	uint64_t sortition_binomial_cdf_walk(         func binomialCDFWalkF128(
-//	    double n, double p, double ratio,             n, p, ratio float64, money uint64) uint64 {
+//	    double n, double p, double ratio,             p float64, ratio f128, money uint64) uint64 {
 //	    uint64_t money) {
 //	  binomial_distribution<double> dist(n, p);     dist := newBinomialF128(p, money)
 //	  for (uint64_t j = 0; j < money; j++) {        for j := uint64(0); j < money; j++ {
 //	    double boundary = cdf(dist, j);               boundary := dist.cdf(j)
-//	    if (ratio <= boundary) {                      if rf.cmp(boundary) <= 0 {
+//	    if (ratio <= boundary) {                      if ratio.cmp(boundary) <= 0 {
 //	      return j;                                     return j
 //	    }                                           }
 //	  }                                           }
 //	  return money;                               return money
 //	}                                           }
 //
-// The only difference is HOW the binomial CDF P(X<=j) is obtained: Boost computes
-// cdf(dist, j) = ibetac(j+1, n-j, p) afresh each step in hardware double, whereas
-// dist.cdf(j) returns the identical value as the running PMF sum in software f128
-// (see binomialF128), making the result bit-reproducible on every platform. (n is
-// unused: the trial count is the exact uint64 `money`; Boost needs n only as the
-// double argument used to construct dist.)
+// Boost computes cdf(dist, j) = ibetac(j+1, n-j, p) afresh each step in hardware
+// double, whereas dist.cdf(j) returns the same mathematical value as a running
+// PMF sum in software f128 (see binomialF128). The f128 path also receives the
+// digest ratio directly at f128 precision.
 //
 // Precondition: money is within the sortition domain -- at most the total online
 // microalgo supply (~10^16 < 2^54). The f128 exponent is a plain int; for money
@@ -418,19 +454,17 @@ func (b *binomialF128) cdf(j uint64) f128 {
 // supply (>~2^57) is outside the domain -- Boost's Select cannot evaluate it
 // either -- and would eventually overflow the int exponent; behavior is undefined
 // there.
-func binomialCDFWalkF128(n float64, p float64, ratio float64, money uint64) uint64 {
-	_ = n
+func binomialCDFWalkF128(p float64, ratio f128, money uint64) uint64 {
 	dist := newBinomialF128(p, money)
 	if dist == nil { // p >= 1: cdf(j)==0 for j<money, cdf(money)==1
-		if ratio <= 0 {
+		if ratio.isZero() {
 			return 0
 		}
 		return money
 	}
-	rf := f128FromFloat64(ratio)
 	for j := uint64(0); j < money; j++ {
 		boundary := dist.cdf(j) // = cdf(dist, j) = P(X <= j)
-		if rf.cmp(boundary) <= 0 {
+		if ratio.cmp(boundary) <= 0 {
 			return j
 		}
 	}

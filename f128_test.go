@@ -43,22 +43,18 @@ import (
 // practical maximum.)
 func selectBigOracle(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Digest) uint64 {
 	binomialP := expectedSize / float64(totalMoney)
-	t := &big.Int{}
-	t.SetBytes(vrfOutput[:])
-	h := new(big.Float).SetPrec(precision).SetInt(t)
-	cratio, _ := new(big.Float).Quo(h, maxFloat).Float64()
 
 	const prec = f128MantBits
+	ratio := digestRatioBig(vrfOutput, prec)
 	p := new(big.Float).SetPrec(prec).SetFloat64(binomialP)
 	q := new(big.Float).SetPrec(prec).Sub(new(big.Float).SetPrec(prec).SetInt64(1), p)
 	if q.Sign() <= 0 { // p >= 1
-		if cratio <= 0 {
+		if ratio.Sign() <= 0 {
 			return 0
 		}
 		return money
 	}
 	pq := new(big.Float).SetPrec(prec).Quo(p, q)
-	ratio := new(big.Float).SetPrec(prec).SetFloat64(cratio)
 	pmf := bigIntPow(q, money, prec) // (1-p)^money
 	cdf := new(big.Float).SetPrec(prec).Set(pmf)
 	if cdf.Cmp(ratio) >= 0 {
@@ -78,6 +74,16 @@ func selectBigOracle(money uint64, totalMoney uint64, expectedSize float64, vrfO
 	return money
 }
 
+func digestRatioBig(d Digest, prec uint) *big.Float {
+	numerator := new(big.Int).SetBytes(d[:])
+	denominator := new(big.Int).Lsh(big.NewInt(1), DigestSize*8)
+	denominator.Sub(denominator, big.NewInt(1))
+	return new(big.Float).SetPrec(prec).Quo(
+		new(big.Float).SetInt(numerator),
+		new(big.Float).SetInt(denominator),
+	)
+}
+
 func bigIntPow(base *big.Float, e uint64, prec uint) *big.Float {
 	result := new(big.Float).SetPrec(prec).SetInt64(1)
 	b := new(big.Float).SetPrec(prec).Set(base)
@@ -93,24 +99,21 @@ func bigIntPow(base *big.Float, e uint64, prec uint) *big.Float {
 	return result
 }
 
-// FuzzSelectF128 differentially fuzzes the two independent deterministic
-// implementations -- SelectF128 (hand-rolled f128 integer arithmetic) and
-// selectBigOracle (math/big.Float) -- which must return the same count. A bug in
-// the f128 code would have to be mirrored in big.Float to escape this.
+// FuzzSelectF128 differentially fuzzes the hand-rolled f128 implementation
+// against the independent math/big.Float oracle.
 func FuzzSelectF128(f *testing.F) {
-	seedVRF := append(bytes.Repeat([]byte{0xff}, 7), make([]byte, 25)...) // ratio rounds to 1.0
-	// the two ratio->1.0 cases native fuzzing found while developing f128:
-	f.Add(uint64(1954), uint64(1999999999999964), 1500.0, seedVRF)
+	seedVRF := append(bytes.Repeat([]byte{0xff}, 7), make([]byte, 25)...)
+	f.Add(uint64(1954), uint64(1_999_999_999_999_964), 1500.0, seedVRF)
 	f.Add(uint64(1141), uint64(1000), 250.0, seedVRF)
 	f.Add(uint64(0), uint64(2_000_000_000_000_000), 20.0, make([]byte, 32))
-	f.Add(uint64(1000), uint64(1000), 1000.0, make([]byte, 32)) // p == 1
+	f.Add(uint64(1000), uint64(1000), 1000.0, make([]byte, 32))
 
 	f.Fuzz(func(t *testing.T, money, total uint64, expected float64, vrf []byte) {
 		if total == 0 || math.IsNaN(expected) || math.IsInf(expected, 0) ||
 			expected < 0 || expected > float64(total) {
 			return
 		}
-		money %= 3001 // bound the walk so each fuzz exec stays fast
+		money %= 3001
 		var d Digest
 		copy(d[:], vrf)
 		got := SelectF128(money, total, expected, d)
@@ -122,13 +125,9 @@ func FuzzSelectF128(f *testing.F) {
 	})
 }
 
-// TestF128AgreesWithCurrent shows that SelectF128 (pure Go) returns the same
-// selection count as the current C++ Select (Boost, hardware double) on realistic
-// random inputs. They are designed to agree everywhere except at knife-edge VRF
-// outputs (ratios within ~2^-53 of a CDF boundary), where the current libm-double
-// value and the deterministic value can differ by 1 -- precisely the
-// last-bit non-determinism the f128 path is meant to remove. Random ratios
-// essentially never hit those, so agreement is ~100%.
+// TestF128AgreesWithCurrent checks broad agreement with the deployed
+// Boost-double implementation. Knife-edge differences remain expected because
+// SelectF128 uses an f128 digest ratio and CDF.
 func TestF128AgreesWithCurrent(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	const total = uint64(2_000_000_000_000_000)
@@ -156,31 +155,95 @@ func TestF128AgreesWithCurrent(t *testing.T) {
 			t.Logf("knife-edge diff: money=%d exp=%g cpp=%d f128=%d", money, exp, cpp, f)
 		}
 	}
-	t.Logf("SelectF128 vs C++ Select: %d/%d agree (%d differ, all knife edges)", match, considered, diffs)
-	if match*1000 < considered*999 { // < 99.9% would indicate a real bug, not knife edges
-		t.Errorf("agreement %d/%d too low -- likely a bug, not knife-edge rounding", match, considered)
+	t.Logf("SelectF128 vs C++ Select: %d/%d agree (%d differ)", match, considered, diffs)
+	if match*1000 < considered*999 {
+		t.Errorf("agreement %d/%d too low", match, considered)
+	}
+}
+
+func TestF128DigestRatioMatchesBigFloat(t *testing.T) {
+	cases := make([]Digest, 0, 1389)
+	cases = append(cases, Digest{})
+	setBit := func(d *Digest, bit int) {
+		d[len(d)-1-bit/8] |= byte(1) << uint(bit%8)
+	}
+
+	// Exercise every possible normalization shift.
+	for bit := 0; bit < DigestSize*8; bit++ {
+		var d Digest
+		setBit(&d, bit)
+		cases = append(cases, d)
+	}
+
+	// Exercise exact halfway tails at every shift where a tail remains. The
+	// denominator correction must make each of these round upward.
+	for leading := 0; leading < f128MantBits; leading++ {
+		var d Digest
+		setBit(&d, DigestSize*8-1-leading)
+		setBit(&d, f128MantBits-1-leading)
+		cases = append(cases, d)
+	}
+
+	var one Digest
+	one[len(one)-1] = 1
+	cases = append(cases, one)
+
+	var halfway Digest
+	halfway[0] = 0x80
+	halfway[16] = 0x80
+	cases = append(cases, halfway)
+
+	var maximum Digest
+	for i := range maximum {
+		maximum[i] = 0xff
+	}
+	cases = append(cases, maximum)
+
+	var nearMaximum Digest
+	for i := 0; i < 7; i++ {
+		nearMaximum[i] = 0xff
+	}
+	cases = append(cases, nearMaximum)
+
+	rng := rand.New(rand.NewSource(3))
+	for i := 0; i < 1000; i++ {
+		var d Digest
+		rng.Read(d[:])
+		cases = append(cases, d)
+	}
+
+	for _, d := range cases {
+		got := f128FromDigestRatio(d).toBigFloat()
+		want := digestRatioBig(d, f128MantBits)
+		if got.Cmp(want) != 0 {
+			t.Fatalf("digest ratio mismatch for %x: f128=%v big.Float=%v", d, got, want)
+		}
+	}
+}
+
+func TestSelectF128NearMaximumDigest(t *testing.T) {
+	var d Digest
+	for i := 0; i < 7; i++ {
+		d[i] = 0xff
+	}
+	got := SelectF128(1954, 1_999_999_999_999_964, 1500, d)
+	if got != 1 {
+		t.Fatalf("SelectF128=%d, want 1 for exact near-maximum digest ratio", got)
 	}
 }
 
 // FuzzF128Ops validates the f128 arithmetic primitives directly against
-// math/big.Float, one operation at a time -- finer-grained than the end-to-end
-// FuzzSelectF128. Each fuzzed pair of f128 operands is exact-compared (via
-// toBigFloat, which is what gives that method a job: inspecting exact f128 values)
-// to the same operation in 128-bit big.Float. A rounding/normalization bug in
-// mul/add/divU shows here immediately, on operands the end-to-end walk never
-// produces.
+// math/big.Float at the same mantissa width.
 func FuzzF128Ops(f *testing.F) {
 	f.Add(uint64(1)<<63, uint64(0), 0, uint64(3)<<62, uint64(0), 0, uint64(7))
-	f.Add(uint64(0), uint64(0), 0, uint64(1)<<63, uint64(1), -5, uint64(1)) // zero operand
+	f.Add(uint64(0), uint64(0), 0, uint64(1)<<63, uint64(1), -5, uint64(1))
 	f.Fuzz(func(t *testing.T, ahi, alo uint64, aexp int, bhi, blo uint64, bexp int, u uint64) {
-		// norm128 turns arbitrary bits into a valid normalized (or zero) f128;
-		// bound the exponents so the op exponent arithmetic (a.exp+b.exp+128) is sane.
 		a := norm128(ahi, alo, aexp%4000-2000)
 		b := norm128(bhi, blo, bexp%4000-2000)
 		ab, bb := a.toBigFloat(), b.toBigFloat()
 		check := func(name string, got f128, want *big.Float) {
 			if got.toBigFloat().Cmp(want) != 0 {
-				t.Fatalf("%s: f128=%v  big.Float=%v  (a=%v b=%v u=%d)", name, got.toBigFloat(), want, ab, bb, u)
+				t.Fatalf("%s: f128=%v big.Float=%v (a=%v b=%v u=%d)", name, got.toBigFloat(), want, ab, bb, u)
 			}
 		}
 		check("mul", a.mul(b), new(big.Float).SetPrec(f128MantBits).Mul(ab, bb))
