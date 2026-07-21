@@ -1,0 +1,139 @@
+{
+  "format": 1,
+  "generator": "python-flint 0.6.0 / Arb regularized incomplete beta",
+  "semantics": "exact binomial CDF; frozen-tail definition is tested separately",
+  "vectors": [
+    {
+      "cdf_previous_upper": {"exponent": -128, "mantissa": "156599776420698413224136027028177551535"},
+      "cdf_selected_lower": {"exponent": -128, "mantissa": "183682590500240050239238580403590659885"},
+      "digest": "8000000000000000000000000000000000000000000000000000000000000000",
+      "expected_size": 100,
+      "label": "toy symmetric median",
+      "money": 100,
+      "precision_bits": 128,
+      "total_money": 200,
+      "want": 50
+    },
+    {
+      "cdf_previous_upper": {"exponent": 0, "mantissa": "0"},
+      "cdf_selected_lower": {"exponent": -127, "mantissa": "132489513636925215833268058479265445677"},
+      "digest": "5555555555555555555555555555555555555555555555555555555555555555",
+      "expected_size": 1,
+      "label": "toy low probability",
+      "money": 250,
+      "precision_bits": 128,
+      "total_money": 1000,
+      "want": 0
+    },
+    {
+      "cdf_previous_upper": {"exponent": -129, "mantissa": "336977676150904036158535031540153095825"},
+      "cdf_selected_lower": {"exponent": -128, "mantissa": "173445286874191883749825300413014048653"},
+      "digest": "8000000000000000000000000000000000000000000000000000000000000000",
+      "expected_size": 1500,
+      "label": "realistic half stake median",
+      "money": 1000000000000000,
+      "precision_bits": 128,
+      "total_money": 2000000000000000,
+      "want": 750
+    },
+    {
+      "cdf_previous_upper": {"exponent": 0, "mantissa": "0"},
+      "cdf_selected_lower": {"exponent": -128, "mantissa": "340282349906820542765149466846391461685"},
+      "digest": "8000000000000000000000000000000000000000000000000000000000000000",
+      "expected_size": 5000,
+      "label": "base minimum ordinary ratio",
+      "money": 100000,
+      "precision_bits": 128,
+      "total_money": 10000000000000000,
+      "want": 0
+    },
+    {
+      "cdf_previous_upper": {"exponent": -120, "mantissa": "1329227995776608823028674855379832097"},
+      "cdf_selected_lower": {"exponent": -128, "mantissa": "340282366920933148852584800746384209155"},
+      "digest": "fffffffffeffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected_size": 5000,
+      "label": "payout minimum upper tail",
+      "money": 30000000000,
+      "precision_bits": 128,
+      "total_money": 10000000000000000,
+      "want": 5
+    },
+    {
+      "cdf_previous_upper": {"exponent": -255, "mantissa": "57896044618658097653266946477002718428901149743768787149754063757417995575359"},
+      "cdf_selected_lower": {"exponent": -256, "mantissa": "115792089237316195329040965944463479586722667708360581904416723911341536385337"},
+      "digest": "ffffffffffffffefffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected_size": 1500,
+      "label": "online stake 1500 tail",
+      "money": 2000000000000000,
+      "precision_bits": 256,
+      "total_money": 2000000000000000,
+      "want": 1852
+    },
+    {
+      "cdf_previous_upper": {"exponent": -254, "mantissa": "28948022309329048449299151382105534347536068724501085061549015824078971801291"},
+      "cdf_selected_lower": {"exponent": -253, "mantissa": "14474011154664524245255387440208678493560896567140995207334418326168362551413"},
+      "digest": "fffffffffffffeffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected_size": 6000,
+      "label": "online stake 6000 tail",
+      "money": 2000000000000000,
+      "precision_bits": 256,
+      "total_money": 2000000000000000,
+      "want": 6667
+    },
+    {
+      "cdf_previous_upper": {"exponent": -1023, "mantissa": "89884656743115795385242970878554523733564596984016408477625334557586105188621702535322718752296048392454972761686449997199852199991795019341736990637396753510447422984243425760068850563107190941993659593943613760903625081088191641240624303691268980002798728649789643649421203935109649491495961034724279304257"},
+      "cdf_selected_lower": {"exponent": -1023, "mantissa": "89884656743115795385388413133669867415371296882976122087520179112241806050593573000179506316104827266705484847876967722941298388590715560014325342305736617517667199330567254403677229988571370026180049092144739446189306956680122827434420356103071786941032054663434032334314616392702364816670890868039570748871"},
+      "digest": "ffffffffffffffffbfffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected_size": 5000,
+      "label": "supply ceiling 5000 tail",
+      "money": 10000000000000000,
+      "precision_bits": 1024,
+      "total_money": 10000000000000000,
+      "want": 5667
+    },
+    {
+      "cdf_previous_upper": {"exponent": -128, "mantissa": "340282366920938462250232204093755176997"},
+      "cdf_selected_lower": {"exponent": -126, "mantissa": "85070591730234615630680912901280710237"},
+      "digest": "ffffffffffffffbfffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected_size": 2990,
+      "label": "one third supply 2990 tail",
+      "money": 3333333333333333,
+      "precision_bits": 128,
+      "total_money": 10000000000000000,
+      "want": 1281
+    },
+    {
+      "cdf_previous_upper": {"exponent": -512, "mantissa": "13407807929942495810394297316189667165625824202373296128999426718380328133165363386009866257047385263178159879922554263125227642700345201700995329471586391"},
+      "cdf_selected_lower": {"exponent": -512, "mantissa": "13407807929942597033636683745655549224439377075387229830050959142212430928372199307480576084781478841759129035867135163847950930971121237959356775927134835"},
+      "digest": "ffffffffffffbfffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected_size": 1,
+      "label": "domain edge tiny probability",
+      "money": 72057594037927935,
+      "precision_bits": 512,
+      "total_money": 18446744073709551615,
+      "want": 5
+    },
+    {
+      "cdf_previous_upper": {"exponent": -129, "mantissa": "267764159092786813970757076638904795559"},
+      "cdf_selected_lower": {"exponent": 0, "mantissa": "1"},
+      "digest": "8000000000000000000000000000000000000000000000000000000000000000",
+      "expected_size": 6000,
+      "label": "probability near one",
+      "money": 3000,
+      "precision_bits": 128,
+      "total_money": 6001,
+      "want": 3000
+    },
+    {
+      "cdf_previous_upper": {"exponent": -129, "mantissa": "335325780441179917990356248262715260671"},
+      "cdf_selected_lower": {"exponent": -128, "mantissa": "172619476700348505274287757720384776963"},
+      "digest": "8000000000000000000000000000000000000000000000000000000000000000",
+      "expected_size": 9223372036854775807,
+      "label": "large balanced probability",
+      "money": 3000,
+      "precision_bits": 128,
+      "total_money": 18446744073709551615,
+      "want": 1500
+    }
+  ]
+}
