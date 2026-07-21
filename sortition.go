@@ -62,9 +62,20 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // it line-by-line with Select above: the two function bodies are IDENTICAL except
 // the final call -- where Select invokes the C++ sortition_binomial_cdf_walk
 // (Boost, hardware double), SelectF128 invokes binomialCDFWalkF128 (software
-// f128, see f128.go). Both perform the same binomial-CDF walk and return the same
-// selection count; SelectF128's result is additionally bit-reproducible on every
-// platform/toolchain (no libm, no FMA, no hardware floating point).
+// f128, see f128.go). Both perform the same binomial-CDF walk; SelectF128's result
+// is additionally bit-reproducible on every platform/toolchain (no libm, no FMA,
+// no hardware floating point).
+//
+// CONSENSUS / MIGRATION NOTE. SelectF128 is bit-reproducible but NOT bit-identical
+// to the Boost-double Select. They agree on the overwhelming majority of inputs
+// (see TestF128AgreesWithCurrent) but differ at knife-edge VRF outputs -- ratios
+// within ~2^-53 of a CDF boundary, including a VRF whose ratio rounds to exactly
+// 1.0, where the gap can exceed 1. Each difference is a different committee
+// selection, so swapping Select -> SelectF128 in production is a protocol-gated,
+// network-coordinated consensus change, never a drop-in: a node on SelectF128
+// while peers run Boost would fork at those inputs. At such edges SelectF128
+// returns the correctly-rounded (128-bit) count; the divergence is exactly the
+// libm/double last-bit non-determinism that f128 removes.
 func SelectF128(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Digest) uint64 {
 	binomialN := float64(money)
 	binomialP := expectedSize / float64(totalMoney)

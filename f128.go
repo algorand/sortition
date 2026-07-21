@@ -411,6 +411,14 @@ func (b *binomialF128) cdf(j uint64) f128 {
 // (see binomialF128), making the result bit-reproducible on every platform. (n is
 // unused: the trial count is the exact uint64 `money`; Boost needs n only as the
 // double argument used to construct dist.)
+//
+// Precondition: money is within the sortition domain -- at most the total online
+// microalgo supply (~10^16 < 2^54). The f128 exponent is a plain int; for money
+// in that range the exponent of (1-p)^money cannot overflow it (its magnitude is
+// bounded by roughly the mean money*p, a committee size). money far beyond the
+// supply (>~2^57) is outside the domain -- Boost's Select cannot evaluate it
+// either -- and would eventually overflow the int exponent; behavior is undefined
+// there.
 func binomialCDFWalkF128(n float64, p float64, ratio float64, money uint64) uint64 {
 	_ = n
 	dist := newBinomialF128(p, money)

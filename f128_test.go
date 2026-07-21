@@ -30,6 +30,17 @@ import (
 // width instead of the hand-rolled f128. SelectF128 is fuzz-checked to be
 // bit-identical to this (FuzzSelectF128), which is what justifies trusting the
 // hand-rolled integer arithmetic in f128.go. Mirrors binomialCDFWalkF128 exactly.
+//
+// Valid range: big.Float's exponent is an int32, so pmf0 = (1-p)^money underflows
+// to exactly 0 once it drops below ~2^(-2^31). That requires the mean money*p to
+// exceed ~1.5e9 (a committee of ~1.5 billion) -- far outside any reachable
+// sortition input, where the mean is a committee size (<= a few thousand). So the
+// oracle is exact for every reachable input: FuzzSelectF128 stays well inside it
+// (money %= 3001), and TestF128MatchesOracleLargeMoney exercises realistic large
+// money (up to ~2^51) where it is likewise exact. (A truly unbounded oracle would
+// need big.Rat, which is infeasible at large money -- (1-p)^money has a
+// total^money denominator -- so this range, covering all reachable inputs, is the
+// practical maximum.)
 func selectBigOracle(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Digest) uint64 {
 	binomialP := expectedSize / float64(totalMoney)
 	t := &big.Int{}
@@ -150,5 +161,58 @@ func TestF128AgreesWithCurrent(t *testing.T) {
 	t.Logf("SelectF128 vs C++ Select: %d/%d agree (%d differ, all knife edges)", match, considered, diffs)
 	if match*1000 < considered*999 { // < 99.9% would indicate a real bug, not knife edges
 		t.Errorf("agreement %d/%d too low -- likely a bug, not knife-edge rounding", match, considered)
+	}
+}
+
+// FuzzF128Ops validates the f128 arithmetic primitives directly against
+// math/big.Float, one operation at a time -- finer-grained than the end-to-end
+// FuzzSelectF128. Each fuzzed pair of f128 operands is exact-compared (via
+// toBigFloat, which is what gives that method a job: inspecting exact f128 values)
+// to the same operation in 128-bit big.Float. A rounding/normalization bug in
+// mul/add/divU shows here immediately, on operands the end-to-end walk never
+// produces. Run: go test -run x -fuzz FuzzF128Ops
+func FuzzF128Ops(f *testing.F) {
+	f.Add(uint64(1)<<63, uint64(0), 0, uint64(3)<<62, uint64(0), 0, uint64(7))
+	f.Add(uint64(0), uint64(0), 0, uint64(1)<<63, uint64(1), -5, uint64(1)) // zero operand
+	f.Fuzz(func(t *testing.T, ahi, alo uint64, aexp int, bhi, blo uint64, bexp int, u uint64) {
+		// norm128 turns arbitrary bits into a valid normalized (or zero) f128;
+		// bound the exponents so the op exponent arithmetic (a.exp+b.exp+128) is sane.
+		a := norm128(ahi, alo, aexp%4000-2000)
+		b := norm128(bhi, blo, bexp%4000-2000)
+		ab, bb := a.toBigFloat(), b.toBigFloat()
+		check := func(name string, got f128, want *big.Float) {
+			if got.toBigFloat().Cmp(want) != 0 {
+				t.Fatalf("%s: f128=%v  big.Float=%v  (a=%v b=%v u=%d)", name, got.toBigFloat(), want, ab, bb, u)
+			}
+		}
+		check("mul", a.mul(b), new(big.Float).SetPrec(f128MantBits).Mul(ab, bb))
+		check("add", a.add(b), new(big.Float).SetPrec(f128MantBits).Add(ab, bb))
+		if u != 0 {
+			check("divU", a.divU(u),
+				new(big.Float).SetPrec(f128MantBits).Quo(ab, new(big.Float).SetPrec(f128MantBits).SetUint64(u)))
+		}
+	})
+}
+
+// TestF128MatchesOracleLargeMoney extends the strict SelectF128 == oracle check
+// beyond FuzzSelectF128's money<=3000 cap to realistic LARGE money (up to ~2^51),
+// where the big.Float oracle is still exact (mean = money*p stays a committee
+// size). Each committee's mean is drawn in [0.05, size] so money stays <= total.
+func TestF128MatchesOracleLargeMoney(t *testing.T) {
+	rng := rand.New(rand.NewSource(2))
+	const total = uint64(2_000_000_000_000_000)
+	committees := []float64{20, 1500, 2990, 6000}
+	for i := 0; i < 3000; i++ {
+		size := committees[rng.Intn(len(committees))]
+		mean := 0.05 + rng.Float64()*size          // mean <= size  =>  money <= total
+		money := uint64(mean * float64(total) / size) // up to ~2^51
+		if money == 0 {
+			continue
+		}
+		var d Digest
+		rng.Read(d[:])
+		if got, want := SelectF128(money, total, size, d), selectBigOracle(money, total, size, d); got != want {
+			t.Fatalf("SelectF128=%d != oracle=%d (money=%d size=%g vrf=%x)", got, want, money, size, d)
+		}
 	}
 }
