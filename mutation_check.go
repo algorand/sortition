@@ -11,8 +11,6 @@
 // Run from the repo root:
 //
 //	go run mutation_check.go
-//
-// See ~/ga/docs/2026-07-21-sortition-f128-testing-blind-spots.md, section T2.
 package main
 
 import (

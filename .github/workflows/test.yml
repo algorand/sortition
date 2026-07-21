@@ -7,8 +7,23 @@ on:
   pull_request:
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # Both architectures on each OS. TestGolden pins exact outputs, so a
+        # floating-point divergence in the cgo/Boost CDF between these targets
+        # shows up here as a failure rather than a silent consensus split.
+        os:
+          - ubuntu-latest    # linux/amd64
+          - ubuntu-24.04-arm # linux/arm64
+          - macos-latest     # darwin/arm64
+          - macos-15-intel   # darwin/amd64
+          - windows-latest   # windows/amd64
+    defaults:
+      run:
+        shell: bash
     steps:
     - uses: actions/checkout@v3
 
@@ -27,3 +42,22 @@ jobs:
     # so 20000 leaves ample margin while staying under a few seconds).
     - name: Rapid property tests
       run: go test -v -run TestRapid -rapid.checks=20000 ./...
+
+  # Applies each curated single-site mutant of the f128 arithmetic and
+  # verifies the fast suite kills it (survivors marked equivalent carry
+  # written proofs and are expected). This keeps the kill-rate claim true
+  # over time: a weakened test lets a mutant survive, and a semantic change
+  # to the arithmetic makes an equivalent mutant die or a target string
+  # disappear -- both fail the job, deliberately coupling the mutant table to
+  # the consensus-critical lines it guards. Platform-independent, so one leg.
+  mutation:
+    name: Mutation campaign
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+
+    - name: Run mutation campaign
+      run: go run mutation_check.go
