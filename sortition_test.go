@@ -34,6 +34,10 @@ func BenchmarkSortition(b *testing.B) {
 }
 
 func TestSortitionBasic(t *testing.T) {
+	// The 2% tolerance below is only ~2 sigma for N=1000, so a randomly
+	// seeded rng flakes about 4% of the time (21/500 in one measurement);
+	// seed deterministically to keep the sanity check stable.
+	rng := rand.New(rand.NewSource(42))
 	hitcount := uint64(0)
 	const N = 1000
 	const expectedSize = 20
@@ -41,7 +45,7 @@ func TestSortitionBasic(t *testing.T) {
 	const totalMoney = 200
 	for i := 0; i < N; i++ {
 		var vrfOutput Digest
-		rand.Read(vrfOutput[:])
+		rng.Read(vrfOutput[:])
 		selected := Select(myMoney, totalMoney, expectedSize, vrfOutput)
 		hitcount += selected
 	}
