@@ -96,9 +96,7 @@ func bigIntPow(base *big.Float, e uint64, prec uint) *big.Float {
 // FuzzSelectF128 differentially fuzzes the two independent deterministic
 // implementations -- SelectF128 (hand-rolled f128 integer arithmetic) and
 // selectBigOracle (math/big.Float) -- which must return the same count. A bug in
-// the f128 code would have to be mirrored in big.Float to escape this. Run:
-//
-//	go test -run x -fuzz FuzzSelectF128
+// the f128 code would have to be mirrored in big.Float to escape this.
 func FuzzSelectF128(f *testing.F) {
 	seedVRF := append(bytes.Repeat([]byte{0xff}, 7), make([]byte, 25)...) // ratio rounds to 1.0
 	// the two ratio->1.0 cases native fuzzing found while developing f128:
@@ -170,7 +168,7 @@ func TestF128AgreesWithCurrent(t *testing.T) {
 // toBigFloat, which is what gives that method a job: inspecting exact f128 values)
 // to the same operation in 128-bit big.Float. A rounding/normalization bug in
 // mul/add/divU shows here immediately, on operands the end-to-end walk never
-// produces. Run: go test -run x -fuzz FuzzF128Ops
+// produces.
 func FuzzF128Ops(f *testing.F) {
 	f.Add(uint64(1)<<63, uint64(0), 0, uint64(3)<<62, uint64(0), 0, uint64(7))
 	f.Add(uint64(0), uint64(0), 0, uint64(1)<<63, uint64(1), -5, uint64(1)) // zero operand
@@ -204,7 +202,7 @@ func TestF128MatchesOracleLargeMoney(t *testing.T) {
 	committees := []float64{20, 1500, 2990, 6000}
 	for i := 0; i < 3000; i++ {
 		size := committees[rng.Intn(len(committees))]
-		mean := 0.05 + rng.Float64()*size          // mean <= size  =>  money <= total
+		mean := 0.05 + rng.Float64()*size             // mean <= size  =>  money <= total
 		money := uint64(mean * float64(total) / size) // up to ~2^51
 		if money == 0 {
 			continue

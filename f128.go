@@ -36,8 +36,7 @@ import (
 // TO EVEN (matching math/big.Float). Round-to-nearest is required, not merely
 // nicer: a VRF near the maximum makes the ratio round to exactly 1.0, and only
 // round-to-nearest lets the accumulated cdf reach 1.0 (truncation asymptotes just
-// below it and the walk runs to `money`). SelectF128 is fuzz-checked against a
-// math/big.Float reference (see f128_test.go), including that case.
+// below it and the walk runs to `money`).
 type f128 struct {
 	hi, lo uint64
 	exp    int
