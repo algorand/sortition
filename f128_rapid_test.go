@@ -41,10 +41,10 @@ import (
 // shallow-quotient bands where a divU rounding bug previously hid.
 func bandedUint64(t *rapid.T, label string) uint64 {
 	return rapid.OneOf(
-		rapid.Uint64Range(0, 1<<57),          // walk domain (u = step index)
-		rapid.Uint64Range(1<<57, 1<<62),      // deep quotients beyond the domain
-		rapid.Uint64Range(1<<62, 1<<63),      // quotient round bit in the last digit
-		rapid.Uint64Range(1<<63, ^uint64(0)), // 128-bit shallow quotients
+		rapid.Uint64Range(0, SelectF128MaxMoney),     // walk domain (u = step index)
+		rapid.Uint64Range(SelectF128MaxMoney, 1<<62), // deep quotients beyond the domain
+		rapid.Uint64Range(1<<62, 1<<63),              // quotient round bit in the last digit
+		rapid.Uint64Range(1<<63, ^uint64(0)),         // 128-bit shallow quotients
 	).Draw(t, label)
 }
 

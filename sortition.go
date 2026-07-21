@@ -58,15 +58,23 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 	return uint64(C.sortition_binomial_cdf_walk(C.double(binomialN), C.double(binomialP), C.double(cratio), C.uint64_t(money)))
 }
 
-// SelectF128MaxMoney bounds SelectF128's money argument. Below it, every
-// exponent in the f128 walk fits int64 even at the most extreme representable
-// probability (1-p is at least 2^-64 for any expectedSize < totalMoney, so
-// |exp| <= 64*(money-1) < 2^63). The bound leaves ~8 bits of headroom over
-// Algorand's 10^16 microalgo supply; behavior above it is undefined, and
-// SelectF128 does not check it at runtime. Consumers should assert their
-// supply invariants against this constant in a test, so a future economics
-// change fails loudly there instead of silently misrounding consensus.
-const SelectF128MaxMoney = uint64(1) << 57
+// SelectF128MaxMoney bounds SelectF128's money argument. The f128 stored
+// exponent of a value v is about log2(v) - 127 (the mantissa is normalized to
+// [2^127, 2^128)), and the smallest representable 1-p exceeds 2^-64, so
+// pmf(0) = (1-p)^money carries a stored exponent no lower than
+// -64*money - 128, and the worst intermediate -- the a.exp+b.exp sum inside a
+// multiply, whose value parts total at most money -- stays above
+// -64*money - 256. With money < 2^56 every such quantity is bounded by
+// ~2^62+2^8 in magnitude, comfortably inside int64. (A 2^57 bound is NOT
+// safe: money = 2^57-1 with 1-p = 1/(2^64-1) needs a stored exponent near
+// -2^63-63 and wraps.)
+//
+// The bound is ~7x (about 2.8 bits) above Algorand's 10^16 microalgo supply.
+// Behavior above it is undefined, and SelectF128 does not check it at
+// runtime. Consumers should assert their supply invariants against this
+// constant in a test, so a future economics change fails loudly there instead
+// of silently misrounding consensus.
+const SelectF128MaxMoney = uint64(1) << 56
 
 // SelectF128 is a deterministic sortition function. It evaluates both the VRF
 // ratio and binomial CDF at f128 precision using software integer arithmetic, so

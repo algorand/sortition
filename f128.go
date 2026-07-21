@@ -530,11 +530,12 @@ func (b *binomialF128) cdf(j uint64) f128 {
 // digest ratio directly at f128 precision, and the success probability as its
 // exact integer numerator and denominator rather than a float64 quotient.
 //
-// Precondition: money < SelectF128MaxMoney (2^57). Below that bound every
-// exponent in the walk fits int64 even at the most extreme representable
-// probability: 1-p is at least 2^-64, so |exp| <= 64*(money-1) < 2^63. The
-// bound leaves ~8 bits of headroom over the ~10^16 microalgo supply; behavior
-// beyond it is undefined (Boost's Select cannot evaluate such money either).
+// Precondition: money < SelectF128MaxMoney (2^56). Below that bound no int64
+// exponent arithmetic in the walk can wrap, even at the most extreme
+// representable probability -- see the constant's doc for the accounting,
+// which must include the mantissa normalization offset (stored exp is
+// log2(v) - 127) and mul's intermediate exponent sums. Behavior beyond the
+// bound is undefined (Boost's Select cannot evaluate such money either).
 func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint64) uint64 {
 	dist := newBinomialF128(expectedSize, totalMoney, money)
 	if dist == nil { // p >= 1: cdf(j)==0 for j<money, cdf(money)==1
