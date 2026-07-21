@@ -26,6 +26,8 @@ jobs:
 
     - name: Set up Go
       uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
 
     - name: Build
       run: go build -v ./...
@@ -55,6 +57,8 @@ jobs:
 
     - name: Set up Go
       uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
 
     - name: Run mutation campaign
       run: go run mutation_check.go
