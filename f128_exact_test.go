@@ -139,6 +139,134 @@ func TestSelectF128NearExactMath(t *testing.T) {
 	check(supply/3, supply, 2990, maxDigestMinusPowerOfTwo(198), true) // ratio ~1-2^-58
 }
 
+// exactCDFNum returns the numerator of the EXACT binomial CDF at j over the
+// denominator totalMoney^money: sum_{i<=j} C(money,i) * E^i * (T-E)^(money-i),
+// built from first principles with stdlib binomial coefficients. It shares no
+// formula with the walk or the differential oracle, which both use the PMF
+// recurrence pmf(j) = pmf(j-1)*(money-j+1)/j * pq -- a shared algebra error
+// there would pass every differential test but not this.
+func exactCDFNum(money, totalMoney, expectedSize, j uint64) *big.Int {
+	e := new(big.Int).SetUint64(expectedSize)
+	q := new(big.Int).SetUint64(totalMoney - expectedSize)
+	sum := new(big.Int)
+	for i := uint64(0); i <= j; i++ {
+		term := new(big.Int).Binomial(int64(money), int64(i))
+		term.Mul(term, new(big.Int).Exp(e, new(big.Int).SetUint64(i), nil))
+		term.Mul(term, new(big.Int).Exp(q, new(big.Int).SetUint64(money-i), nil))
+		sum.Add(sum, term)
+	}
+	return sum
+}
+
+// selectExactRat runs the walk against the exact CDF with pure integer
+// arithmetic: ratio <= cdf(j) becomes t * T^money <= cdfNum(j) * (2^256-1).
+// No rounding anywhere. Cost grows as T^money-sized integers, so callers keep
+// money small.
+func selectExactRat(money, totalMoney, expectedSize uint64, vrfOutput Digest) uint64 {
+	tDig := new(big.Int).SetBytes(vrfOutput[:])
+	if expectedSize >= totalMoney { // p >= 1
+		if tDig.Sign() == 0 {
+			return 0
+		}
+		return money
+	}
+	den256 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	lhs := new(big.Int).Mul(tDig,
+		new(big.Int).Exp(new(big.Int).SetUint64(totalMoney), new(big.Int).SetUint64(money), nil))
+	for j := uint64(0); j < money; j++ {
+		rhs := new(big.Int).Mul(exactCDFNum(money, totalMoney, expectedSize, j), den256)
+		if lhs.Cmp(rhs) <= 0 {
+			return j
+		}
+	}
+	return money
+}
+
+// TestSelectF128VsExactRat compares the 128-bit walk against exact
+// mathematics for small money, including digests constructed to sit exactly
+// on true CDF boundaries. Agreement must be within one boundary outside the
+// frozen sliver; a formula error shared by the implementation and the
+// differential oracle cannot hide here.
+func TestSelectF128VsExactRat(t *testing.T) {
+	rng := rand.New(rand.NewSource(9))
+	den256 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	check := func(money, total, expected uint64, d Digest) {
+		t.Helper()
+		if inFrozenSliver(money, digestRatioBig(d, 512)) {
+			return
+		}
+		got := SelectF128(money, total, expected, d)
+		want := selectExactRat(money, total, expected, d)
+		diff := got - want
+		if want > got {
+			diff = want - got
+		}
+		if diff > 1 {
+			t.Fatalf("SelectF128=%d vs exact=%d (money=%d total=%d expected=%d vrf=%x)",
+				got, want, money, total, expected, d)
+		}
+	}
+
+	for i := 0; i < 300; i++ {
+		money := rng.Uint64() % 51
+		total := 1 + rng.Uint64()>>uint(rng.Intn(40))
+		expected := rng.Uint64() >> uint(rng.Intn(50))
+		var d Digest
+		switch {
+		case i%3 == 0:
+			rng.Read(d[:])
+		case i%3 == 1: // near-maximum digests
+			for j := range d {
+				d[j] = 0xff
+			}
+			d[rng.Intn(10)] = byte(rng.Uint64())
+		default: // a digest exactly on (or one off) a true CDF boundary
+			if money == 0 || expected >= total {
+				rng.Read(d[:])
+				break
+			}
+			j := rng.Uint64() % money
+			tt := new(big.Int).Mul(exactCDFNum(money, total, expected, j), den256)
+			tt.Div(tt, new(big.Int).Exp(new(big.Int).SetUint64(total), new(big.Int).SetUint64(money), nil))
+			tt.Add(tt, big.NewInt(int64(rng.Intn(3)-1)))
+			if tt.Sign() < 0 || tt.Cmp(den256) > 0 {
+				rng.Read(d[:])
+				break
+			}
+			tt.FillBytes(d[:])
+		}
+		check(money, total, expected, d)
+	}
+}
+
+// TestSelectF128Distribution mirrors TestSortitionBasic for the pure-Go path:
+// summed selection weight over many digests must track N * money * p. This is
+// oracle-free AND formula-free -- a gross semantic error (wrong probability,
+// shifted distribution) fails it even if perfectly mirrored everywhere else.
+func TestSelectF128Distribution(t *testing.T) {
+	rng := rand.New(rand.NewSource(4))
+	cases := []struct {
+		name                           string
+		money, total, expected, rounds uint64
+	}{
+		{"half stake", 100, 200, 20, 1000},
+		{"realistic stake", 1_000_000_000_000_000, 2_000_000_000_000_000, 1500, 200},
+	}
+	for _, c := range cases {
+		var hits uint64
+		for i := uint64(0); i < c.rounds; i++ {
+			var d Digest
+			rng.Read(d[:])
+			hits += SelectF128(c.money, c.total, c.expected, d)
+		}
+		want := float64(c.rounds) * float64(c.expected) * float64(c.money) / float64(c.total)
+		if diff := float64(hits) - want; diff < -0.02*want || diff > 0.02*want {
+			t.Errorf("%s: %d selections over %d rounds, want %.0f +/- 2%%",
+				c.name, hits, c.rounds, want)
+		}
+	}
+}
+
 // oracleCDFAt returns the oracle's cdf(j), mirroring selectBigOracle's
 // 128-bit recurrence exactly.
 func oracleCDFAt(money, totalMoney, expectedSize, j uint64) *big.Float {
