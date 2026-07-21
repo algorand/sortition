@@ -272,6 +272,9 @@ func TestSelectF128RatioExactlyOne(t *testing.T) {
 func FuzzF128Ops(f *testing.F) {
 	f.Add(uint64(1)<<63, uint64(0), 0, uint64(3)<<62, uint64(0), 0, uint64(7))
 	f.Add(uint64(0), uint64(0), 0, uint64(1)<<63, uint64(1), -5, uint64(1))
+	// sub's sticky/borrow path (exponent diff >= 65) and near-equal cancellation:
+	f.Add(uint64(1)<<63, uint64(0), 65, uint64(1)<<63, uint64(1), 0, uint64(1))
+	f.Add(uint64(1)<<63, uint64(0), 0, uint64(1)<<63, uint64(1), 0, uint64(3))
 	f.Fuzz(func(t *testing.T, ahi, alo uint64, aexp int, bhi, blo uint64, bexp int, u uint64) {
 		a := norm128(ahi, alo, aexp%4000-2000)
 		b := norm128(bhi, blo, bexp%4000-2000)
@@ -287,6 +290,15 @@ func FuzzF128Ops(f *testing.F) {
 		if u != 0 {
 			check("divU", a.divU(u),
 				new(big.Float).SetPrec(f128MantBits).Quo(ab, new(big.Float).SetPrec(f128MantBits).SetUint64(u)))
+		}
+		// sub is defined for a >= b (f128 is unsigned), so order the operands.
+		if a.cmp(b) >= 0 {
+			check("sub", a.sub(b), new(big.Float).SetPrec(f128MantBits).Sub(ab, bb))
+		} else {
+			check("sub", b.sub(a), new(big.Float).SetPrec(f128MantBits).Sub(bb, ab))
+		}
+		if !b.isZero() {
+			check("div", a.div(b), new(big.Float).SetPrec(f128MantBits).Quo(ab, bb))
 		}
 	})
 }
@@ -311,6 +323,20 @@ func TestF128MatchesOracleLargeMoney(t *testing.T) {
 		if got, want := SelectF128(money, total, size, d), selectBigOracle(money, total, size, d); got != want {
 			t.Fatalf("SelectF128=%d != oracle=%d (money=%d size=%g vrf=%x)", got, want, money, size, d)
 		}
+	}
+}
+
+// BenchmarkSelectF128 mirrors BenchmarkSortition (same parameters) so the pure-Go
+// deterministic path can be compared directly against the cgo/Boost Select.
+func BenchmarkSelectF128(b *testing.B) {
+	b.StopTimer()
+	keys := make([]Digest, b.N)
+	for i := 0; i < b.N; i++ {
+		rand.Read(keys[i][:])
+	}
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		SelectF128(1000000, 1000000000000, 2500, keys[i])
 	}
 }
 

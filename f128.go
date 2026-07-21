@@ -567,15 +567,17 @@ type binomialF128 struct {
 // newBinomialF128 constructs the Binomial(money, p) CDF evaluator -- the analogue
 // of constructing binomial_distribution<double>(n=money, p). The PMF-recurrence
 // constants 1-p and p/(1-p) are formed once, entirely in f128 (no big.Float, no
-// heap): 1-p is exact for the float64 p, and p/(1-p) is a round-to-nearest-even
-// f128 divide. Returns nil for the degenerate p >= 1 (all probability mass at
-// j == money), which the caller handles.
+// heap): both are round-to-nearest-even f128 operations, bit-identical to the
+// 128-bit big.Float oracle (1-p is additionally exact for any p >= ~2^-76,
+// which covers every realistic sortition probability). Returns nil for the
+// degenerate p >= 1 (all probability mass at j == money), which the caller
+// handles.
 func newBinomialF128(p float64, money uint64) *binomialF128 {
 	pf := f128FromFloat64(p)
 	if pf.cmp(f128FromUint64(1)) >= 0 { // p >= 1
 		return nil
 	}
-	qf := f128FromUint64(1).sub(pf) // 1-p (exact)
+	qf := f128FromUint64(1).sub(pf) // 1-p
 	pq := pf.div(qf)                // p/(1-p)
 	pmf0 := qf.intPow(money)        // (1-p)^money
 	return &binomialF128{money: money, pq: pq, pmf: pmf0, cum: pmf0, at: 0}
