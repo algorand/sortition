@@ -82,12 +82,21 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // network-coordinated consensus change.
 //
 // One tail edge: the top ~2^-129 of digest space rounds to an f128 ratio of
-// exactly 1.0. Although the exact CDF remains below 1 for every j < money, the
-// accumulated f128 CDF can itself round to 1.0; the walk returns the first j
-// where that happens (3 in TestSelectF128RatioExactlyOne). Boost's double CDF
-// can saturate at a different j, so the divergence at this edge can exceed one.
-// Such inputs are cryptographically unreachable in practice (a VRF hash in the
-// top 2^-129), so this is a documented property, not a case worth special-casing.
+// exactly 1.0 (only the all-0xff digest IS exactly 1.0; the rest of the
+// interval rounds up to it). With the threshold fixed at 1.0, the exact CDF is
+// < 1 for every j < money and the walk never evaluates cdf(money) == 1, so the
+// exact-CDF count is money -- and the walk returns money unless the accumulated
+// f128 CDF happens to round up to exactly 1.0 at an earlier j (a rounding
+// artifact), in which case it returns that j. Both outcomes occur, decided
+// per-distribution at ulp granularity: the money=1954 case in
+// TestSelectF128RatioExactlyOne stops at j=3, while the same distribution with
+// total=2_000_000_000_000_000 falls through to money. Both match the 128-bit
+// big.Float oracle. Boost's double CDF -- evaluated independently per j via
+// ibetac rather than accumulated -- can also saturate to 1.0 on its far coarser
+// grid, potentially at a different (typically earlier) j, so the divergence
+// here can be as large as money vs. a few. Such inputs are cryptographically
+// unreachable (a VRF hash in the top 2^-129), so this is a documented property,
+// not a case worth special-casing.
 func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
 	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)

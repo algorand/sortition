@@ -237,10 +237,22 @@ func TestSelectF128NearMaximumDigest(t *testing.T) {
 
 // TestSelectF128RatioExactlyOne pins the walk when the f128 ratio is exactly
 // 1.0: mathematically for the all-0xff digest, and by 128-bit rounding for any
-// digest with at least 129 leading one bits. The walk terminates early only
-// because round-to-nearest lets the accumulated cdf reach exactly 1.0 (see the
-// f128 doc comment); with truncation the cdf would stay below 1.0 forever and
-// the walk would run all the way to money.
+// digest with at least 129 leading one bits. With the f128-rounded threshold
+// fixed at 1.0, money is the exact-CDF count; the walk returns an earlier j
+// only when the accumulated f128 CDF happens to round up to exactly 1.0 (see
+// the SelectF128 doc comment). Each case pins one branch:
+//
+//   - money=1954 with total=1_999_999_999_999_964: stops early at j=3, while
+//     the same distribution with total=2_000_000_000_000_000 (36 more) falls
+//     through to money. A hair-trigger pair pinned together: if a rounding
+//     change flips either, the cdf trajectory moved by an ulp -- the walk did
+//     not break.
+//   - money=100, p=1/2: provably falls through to money -- cdf(99) is
+//     1 - 2^-100, which sits 2^28 ulps below 1.0, a gap no rounding can
+//     bridge.
+//   - money=129, p=1/2: the exact boundary -- true cdf(128) = 1 - 2^-129 is
+//     precisely the rounding midpoint, and ties-to-even rounds it up to
+//     exactly 1.0, stopping at j=128.
 func TestSelectF128RatioExactlyOne(t *testing.T) {
 	one := f128FromUint64(1)
 
@@ -248,22 +260,34 @@ func TestSelectF128RatioExactlyOne(t *testing.T) {
 	for i := range maximum {
 		maximum[i] = 0xff
 	}
-	var manyLeadingOnes Digest
-	for i := 0; i < 17; i++ { // 136 leading one bits
-		manyLeadingOnes[i] = 0xff
+	// exactly 129 leading one bits: the minimal digest that rounds to 1.0
+	var minLeadingOnes Digest
+	for i := 0; i < 16; i++ {
+		minLeadingOnes[i] = 0xff
 	}
+	minLeadingOnes[16] = 0x80
 
-	for _, d := range []Digest{maximum, manyLeadingOnes} {
+	cases := []struct {
+		money, total, expected uint64
+		want                   uint64
+	}{
+		{1954, 1_999_999_999_999_964, 1500, 3},
+		{1954, 2_000_000_000_000_000, 1500, 1954},
+		{100, 200, 100, 100},
+		{129, 258, 129, 128},
+	}
+	for _, d := range []Digest{maximum, minLeadingOnes} {
 		if f128FromDigestRatio(d).cmp(one) != 0 {
 			t.Fatalf("digest %x: ratio is not exactly 1.0", d)
 		}
-		got := SelectF128(1954, 1_999_999_999_999_964, 1500, d)
-		want := selectBigOracle(1954, 1_999_999_999_999_964, 1500, d)
-		if got != want {
-			t.Fatalf("digest %x: SelectF128=%d != oracle=%d", d, got, want)
-		}
-		if got != 3 {
-			t.Fatalf("digest %x: SelectF128=%d, want 3 (cdf reaches exactly 1.0 in the near tail)", d, got)
+		for _, c := range cases {
+			got := SelectF128(c.money, c.total, c.expected, d)
+			if oracle := selectBigOracle(c.money, c.total, c.expected, d); got != oracle {
+				t.Fatalf("digest %x money=%d: SelectF128=%d != oracle=%d", d, c.money, got, oracle)
+			}
+			if got != c.want {
+				t.Fatalf("digest %x money=%d: SelectF128=%d, want %d", d, c.money, got, c.want)
+			}
 		}
 	}
 }
