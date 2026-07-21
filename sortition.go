@@ -82,13 +82,12 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // network-coordinated consensus change.
 //
 // One tail edge: the top ~2^-129 of digest space rounds to an f128 ratio of
-// exactly 1.0, which sits at or above every cdf(j) for j < money. There the walk
-// falls through and returns money (the whole trial count) -- the exact-math value,
-// since cdf(j) < 1 for all j < money and cdf(money) == 1 -- whereas Boost's double
-// cdf saturates to 1.0 early and returns a small count. So at those inputs the
-// divergence can be as large as money vs. a few; they are cryptographically
-// unreachable (a VRF hash in the top 2^-129), so this is a documented property,
-// not a case worth special-casing.
+// exactly 1.0. Although the exact CDF remains below 1 for every j < money, the
+// accumulated f128 CDF can itself round to 1.0; the walk returns the first j
+// where that happens (3 in TestSelectF128RatioExactlyOne). Boost's double CDF
+// can saturate at a different j, so the divergence at this edge can exceed one.
+// Such inputs are cryptographically unreachable in practice (a VRF hash in the
+// top 2^-129), so this is a documented property, not a case worth special-casing.
 func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
 	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)
