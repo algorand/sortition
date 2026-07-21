@@ -18,7 +18,6 @@ package sortition
 
 import (
 	"bytes"
-	"math"
 	"math/big"
 	"math/rand"
 	"testing"
@@ -41,20 +40,21 @@ import (
 // need big.Rat, which is infeasible at large money -- (1-p)^money has a
 // total^money denominator -- so this range, covering all reachable inputs, is the
 // practical maximum.)
-func selectBigOracle(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Digest) uint64 {
-	binomialP := expectedSize / float64(totalMoney)
-
+func selectBigOracle(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	const prec = f128MantBits
 	ratio := digestRatioBig(vrfOutput, prec)
-	p := new(big.Float).SetPrec(prec).SetFloat64(binomialP)
-	q := new(big.Float).SetPrec(prec).Sub(new(big.Float).SetPrec(prec).SetInt64(1), p)
-	if q.Sign() <= 0 { // p >= 1
+	if expectedSize >= totalMoney { // p >= 1
 		if ratio.Sign() <= 0 {
 			return 0
 		}
 		return money
 	}
-	pq := new(big.Float).SetPrec(prec).Quo(p, q)
+	q := new(big.Float).SetPrec(prec).Quo(
+		new(big.Float).SetPrec(prec).SetUint64(totalMoney-expectedSize),
+		new(big.Float).SetPrec(prec).SetUint64(totalMoney))
+	pq := new(big.Float).SetPrec(prec).Quo(
+		new(big.Float).SetPrec(prec).SetUint64(expectedSize),
+		new(big.Float).SetPrec(prec).SetUint64(totalMoney-expectedSize))
 	pmf := bigIntPow(q, money, prec) // (1-p)^money
 	cdf := new(big.Float).SetPrec(prec).Set(pmf)
 	if cdf.Cmp(ratio) >= 0 {
@@ -103,25 +103,26 @@ func bigIntPow(base *big.Float, e uint64, prec uint) *big.Float {
 // against the independent math/big.Float oracle.
 func FuzzSelectF128(f *testing.F) {
 	seedVRF := append(bytes.Repeat([]byte{0xff}, 7), make([]byte, 25)...)
-	f.Add(uint64(1954), uint64(1_999_999_999_999_964), 1500.0, seedVRF)
-	f.Add(uint64(1141), uint64(1000), 250.0, seedVRF)
-	f.Add(uint64(0), uint64(2_000_000_000_000_000), 20.0, make([]byte, 32))
-	f.Add(uint64(1000), uint64(1000), 1000.0, make([]byte, 32))
+	f.Add(uint64(1954), uint64(1_999_999_999_999_964), uint64(1500), seedVRF)
+	f.Add(uint64(1141), uint64(1000), uint64(250), seedVRF)
+	f.Add(uint64(0), uint64(2_000_000_000_000_000), uint64(20), make([]byte, 32))
+	f.Add(uint64(1000), uint64(1000), uint64(1000), make([]byte, 32))
+	f.Add(uint64(100), uint64(1000), uint64(2000), make([]byte, 32)) // expectedSize > totalMoney
 	// all-0xff digest: ratio is exactly 1.0, the cdf-reaches-1.0 regime
-	f.Add(uint64(1954), uint64(1_999_999_999_999_964), 1500.0, bytes.Repeat([]byte{0xff}, 32))
+	f.Add(uint64(1954), uint64(1_999_999_999_999_964), uint64(1500), bytes.Repeat([]byte{0xff}, 32))
 
-	f.Fuzz(func(t *testing.T, money, total uint64, expected float64, vrf []byte) {
-		if total == 0 || math.IsNaN(expected) || math.IsInf(expected, 0) ||
-			expected < 0 || expected > float64(total) {
-			return
-		}
+	// The uint64 expectedSize needs no input filtering: NaN/Inf/negative/
+	// fractional sizes are unrepresentable, and expectedSize >= totalMoney
+	// (including totalMoney == 0) takes the exact-integer p >= 1 path in both
+	// implementations.
+	f.Fuzz(func(t *testing.T, money, total, expected uint64, vrf []byte) {
 		money %= 3001 // bound the walk so each fuzz exec stays fast
 		var d Digest
 		copy(d[:], vrf)
 		got := SelectF128(money, total, expected, d)
 		want := selectBigOracle(money, total, expected, d)
 		if got != want {
-			t.Fatalf("SelectF128=%d != big.Float oracle=%d (money=%d total=%d expected=%g vrf=%x)",
+			t.Fatalf("SelectF128=%d != big.Float oracle=%d (money=%d total=%d expected=%d vrf=%x)",
 				got, want, money, total, expected, d)
 		}
 	})
@@ -133,20 +134,20 @@ func FuzzSelectF128(f *testing.F) {
 func TestF128AgreesWithCurrent(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	const total = uint64(2_000_000_000_000_000)
-	committees := []float64{20, 1500, 2990, 6000}
+	committees := []uint64{20, 1500, 2990, 6000}
 	const n = 200000
 	match, considered, diffs := 0, 0, 0
 	for i := 0; i < n; i++ {
 		exp := committees[rng.Intn(len(committees))]
 		mean := 0.05 + rng.Float64()*30
-		money := uint64(mean * float64(total) / exp)
+		money := uint64(mean * float64(total) / float64(exp))
 		if money == 0 {
 			continue
 		}
 		var d Digest
 		rng.Read(d[:])
 		considered++
-		cpp := Select(money, total, exp, d)
+		cpp := Select(money, total, float64(exp), d)
 		f := SelectF128(money, total, exp, d)
 		if cpp == f {
 			match++
@@ -154,7 +155,7 @@ func TestF128AgreesWithCurrent(t *testing.T) {
 		}
 		diffs++
 		if diffs <= 10 {
-			t.Logf("knife-edge diff: money=%d exp=%g cpp=%d f128=%d", money, exp, cpp, f)
+			t.Logf("knife-edge diff: money=%d exp=%d cpp=%d f128=%d", money, exp, cpp, f)
 		}
 	}
 	t.Logf("SelectF128 vs C++ Select: %d/%d agree (%d differ)", match, considered, diffs)
@@ -272,9 +273,6 @@ func TestSelectF128RatioExactlyOne(t *testing.T) {
 func FuzzF128Ops(f *testing.F) {
 	f.Add(uint64(1)<<63, uint64(0), 0, uint64(3)<<62, uint64(0), 0, uint64(7))
 	f.Add(uint64(0), uint64(0), 0, uint64(1)<<63, uint64(1), -5, uint64(1))
-	// sub's sticky/borrow path (exponent diff >= 65) and near-equal cancellation:
-	f.Add(uint64(1)<<63, uint64(0), 65, uint64(1)<<63, uint64(1), 0, uint64(1))
-	f.Add(uint64(1)<<63, uint64(0), 0, uint64(1)<<63, uint64(1), 0, uint64(3))
 	f.Fuzz(func(t *testing.T, ahi, alo uint64, aexp int, bhi, blo uint64, bexp int, u uint64) {
 		a := norm128(ahi, alo, aexp%4000-2000)
 		b := norm128(bhi, blo, bexp%4000-2000)
@@ -291,12 +289,6 @@ func FuzzF128Ops(f *testing.F) {
 			check("divU", a.divU(u),
 				new(big.Float).SetPrec(f128MantBits).Quo(ab, new(big.Float).SetPrec(f128MantBits).SetUint64(u)))
 		}
-		// sub is defined for a >= b (f128 is unsigned), so order the operands.
-		if a.cmp(b) >= 0 {
-			check("sub", a.sub(b), new(big.Float).SetPrec(f128MantBits).Sub(ab, bb))
-		} else {
-			check("sub", b.sub(a), new(big.Float).SetPrec(f128MantBits).Sub(bb, ab))
-		}
 		if !b.isZero() {
 			check("div", a.div(b), new(big.Float).SetPrec(f128MantBits).Quo(ab, bb))
 		}
@@ -310,18 +302,18 @@ func FuzzF128Ops(f *testing.F) {
 func TestF128MatchesOracleLargeMoney(t *testing.T) {
 	rng := rand.New(rand.NewSource(2))
 	const total = uint64(2_000_000_000_000_000)
-	committees := []float64{20, 1500, 2990, 6000}
+	committees := []uint64{20, 1500, 2990, 6000}
 	for i := 0; i < 3000; i++ {
 		size := committees[rng.Intn(len(committees))]
-		mean := 0.05 + rng.Float64()*size             // mean <= size  =>  money <= total
-		money := uint64(mean * float64(total) / size) // up to ~2^51
+		mean := 0.05 + rng.Float64()*float64(size)             // mean <= size  =>  money <= total
+		money := uint64(mean * float64(total) / float64(size)) // up to ~2^51
 		if money == 0 {
 			continue
 		}
 		var d Digest
 		rng.Read(d[:])
 		if got, want := SelectF128(money, total, size, d), selectBigOracle(money, total, size, d); got != want {
-			t.Fatalf("SelectF128=%d != oracle=%d (money=%d size=%g vrf=%x)", got, want, money, size, d)
+			t.Fatalf("SelectF128=%d != oracle=%d (money=%d size=%d vrf=%x)", got, want, money, size, d)
 		}
 	}
 }

@@ -62,13 +62,23 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // ratio and binomial CDF at f128 precision using software integer arithmetic, so
 // its result is bit-reproducible across platforms.
 //
+// Unlike Select, SelectF128 takes the committee size as the exact uint64 it is
+// in the protocol rather than a float64. The distribution constants are then
+// single correctly-rounded f128 divides of exact integers -- float64(totalMoney)
+// is inexact above 2^53, and a float64 p = expectedSize/totalMoney would stack
+// further roundings -- and invalid probabilities (NaN, Inf, negative,
+// fractional) are unrepresentable. p >= 1, i.e. expectedSize >= totalMoney, is
+// an exact integer comparison, handled as all probability mass at money.
+//
 // CONSENSUS / MIGRATION NOTE. SelectF128 is not bit-identical to the deployed
 // Boost-double Select. They agree on the overwhelming majority of inputs but can
 // differ at knife-edge VRF outputs near a CDF boundary. SelectF128 also preserves
 // the digest ratio at f128 precision instead of first rounding it to float64;
 // this avoids the multi-step tail divergence when a near-maximum digest rounds
-// to 1.0 in float64. Generic CDF-boundary differences can still change a
-// selection by one, so replacing Select with SelectF128 remains a protocol-gated,
+// to 1.0 in float64. The success probability is likewise formed at f128
+// precision from the integer expectedSize/totalMoney instead of a float64
+// quotient. Generic CDF-boundary differences can still change a selection by
+// one, so replacing Select with SelectF128 remains a protocol-gated,
 // network-coordinated consensus change.
 //
 // One tail edge: the top ~2^-129 of digest space rounds to an f128 ratio of
@@ -79,10 +89,9 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // divergence can be as large as money vs. a few; they are cryptographically
 // unreachable (a VRF hash in the top 2^-129), so this is a documented property,
 // not a case worth special-casing.
-func SelectF128(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Digest) uint64 {
-	binomialP := expectedSize / float64(totalMoney)
+func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
-	return binomialCDFWalkF128(binomialP, ratio, money)
+	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)
 }
 
 func init() {

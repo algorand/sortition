@@ -18,7 +18,6 @@ package sortition
 
 import (
 	"encoding/binary"
-	"math"
 	"math/bits"
 )
 
@@ -192,49 +191,12 @@ func norm192(r2, r1, r0 uint64, exp int) f128 {
 	return roundNE(s2, s1, roundBit, sticky, exp+64-lz)
 }
 
-// norm192s is norm192 with an incoming sticky bit: extra records that nonzero
-// bits were discarded below r0 (used by sub, where aligning the subtrahend can
-// shift bits past the 192-bit window). All such bits are far below the result's
-// round bit, so they only ever contribute to sticky.
-func norm192s(r2, r1, r0 uint64, exp int, extra bool) f128 {
-	if r2 == 0 && r1 == 0 && r0 == 0 {
-		return f128{}
-	}
-	var lz int
-	switch {
-	case r2 != 0:
-		lz = bits.LeadingZeros64(r2)
-	case r1 != 0:
-		lz = 64 + bits.LeadingZeros64(r1)
-	default:
-		lz = 128 + bits.LeadingZeros64(r0)
-	}
-	s2, s1, s0 := shl192(r2, r1, r0, uint(lz))
-	roundBit := s0&(1<<63) != 0
-	sticky := s0&^(uint64(1)<<63) != 0 || extra
-	return roundNE(s2, s1, roundBit, sticky, exp+64-lz)
-}
-
 func f128FromUint64(u uint64) f128 {
 	if u == 0 {
 		return f128{}
 	}
 	s := bits.LeadingZeros64(u)
 	return f128{u << uint(s), 0, -(s + 64)}
-}
-
-func f128FromFloat64(f float64) f128 {
-	if f <= 0 {
-		return f128{}
-	}
-	b := math.Float64bits(f)
-	mant := b & (1<<52 - 1)
-	exp := int((b >> 52) & 0x7ff)
-	if exp == 0 { // subnormal: value = mant * 2^-1074
-		return norm128(0, mant, -1074)
-	}
-	// normal: significand (mant|2^52) in [2^52,2^53); MSB (bit 52) -> bit 127.
-	return f128{(mant | 1<<52) << 11, 0, exp - 1150}
 }
 
 // f128FromDigestRatio returns digest/(2^256-1), rounded to nearest-even at
@@ -445,61 +407,6 @@ func (a f128) add(b f128) f128 {
 	return roundNE(shi, slo, round, sticky, exp)
 }
 
-// sub returns a-b, rounded to nearest even, for NON-NEGATIVE operands with
-// a >= b (f128 is unsigned; a < b returns zero). The subtraction is performed
-// exactly in a 192-bit field -- a occupies a.hi:a.lo:0, giving 64 guard bits
-// below a's ulp -- so it is correct even under catastrophic cancellation
-// (a ~= b). b is aligned into that field by an arithmetic right shift; any bits
-// pushed below bit 0 (only possible when b << a, i.e. no cancellation) are
-// folded into sticky. When such bits exist, one field-ulp is borrowed first so
-// the residual (field-ulp - discarded) rounds correctly as pure sticky.
-func (a f128) sub(b f128) f128 {
-	if b.isZero() {
-		return a
-	}
-	if a.cmp(b) <= 0 {
-		return f128{}
-	}
-	diff := uint(a.exp - b.exp)
-	var b2, b1, b0 uint64
-	var sticky bool
-	switch {
-	case diff == 0:
-		b2, b1, b0 = b.hi, b.lo, 0
-	case diff < 64:
-		b2 = b.hi >> diff
-		b1 = b.hi<<(64-diff) | b.lo>>diff
-		b0 = b.lo << (64 - diff)
-	case diff == 64:
-		b2, b1, b0 = 0, b.hi, b.lo
-	case diff < 128:
-		s := diff - 64
-		b1 = b.hi >> s
-		b0 = b.hi<<(64-s) | b.lo>>s
-		sticky = b.lo<<(64-s) != 0
-	case diff == 128:
-		b0 = b.hi
-		sticky = b.lo != 0
-	case diff < 192:
-		s := diff - 128
-		b0 = b.hi >> s
-		sticky = b.hi<<(64-s) != 0 || b.lo != 0
-	default:
-		sticky = true // b nonzero, entirely below the field
-	}
-	if sticky { // borrow one field-ulp so the discarded remainder is pure sticky
-		var brw uint64
-		b0, brw = bits.Add64(b0, 1, 0)
-		b1, brw = bits.Add64(b1, 0, brw)
-		b2 += brw
-	}
-	// a >= b, so the 192-bit subtraction A - B never borrows out of the top.
-	r0, brw := bits.Sub64(0, b0, 0)
-	r1, brw := bits.Sub64(a.lo, b1, brw)
-	r2, _ := bits.Sub64(a.hi, b2, brw)
-	return norm192s(r2, r1, r0, a.exp-64, sticky)
-}
-
 func (a f128) cmp(b f128) int {
 	az, bz := a.isZero(), b.isZero()
 	switch {
@@ -564,22 +471,27 @@ type binomialF128 struct {
 	at    uint64 // index that pmf/cum currently hold
 }
 
-// newBinomialF128 constructs the Binomial(money, p) CDF evaluator -- the analogue
-// of constructing binomial_distribution<double>(n=money, p). The PMF-recurrence
-// constants 1-p and p/(1-p) are formed once, entirely in f128 (no big.Float, no
-// heap): both are round-to-nearest-even f128 operations, bit-identical to the
-// 128-bit big.Float oracle (1-p is additionally exact for any p >= ~2^-76,
-// which covers every realistic sortition probability). Returns nil for the
-// degenerate p >= 1 (all probability mass at j == money), which the caller
-// handles.
-func newBinomialF128(p float64, money uint64) *binomialF128 {
-	pf := f128FromFloat64(p)
-	if pf.cmp(f128FromUint64(1)) >= 0 { // p >= 1
+// newBinomialF128 constructs the CDF evaluator for Binomial(money trials,
+// p = expectedSize/totalMoney) -- the analogue of constructing
+// binomial_distribution<double>(n=money, p). Taking p as its exact integer
+// numerator and denominator lets each PMF-recurrence constant be a SINGLE
+// round-to-nearest-even f128 divide of exact values:
+//
+//	1-p     = (totalMoney-expectedSize) / totalMoney
+//	p/(1-p) = expectedSize / (totalMoney-expectedSize)
+//
+// rather than stacking roundings through an intermediate float64 p (whose
+// float64(totalMoney) conversion is itself inexact above 2^53). Returns nil for
+// the degenerate p >= 1 -- expectedSize >= totalMoney, an exact integer
+// comparison; all probability mass at j == money -- which the caller handles.
+// totalMoney == 0 also lands on the nil path.
+func newBinomialF128(expectedSize, totalMoney, money uint64) *binomialF128 {
+	if expectedSize >= totalMoney { // p >= 1
 		return nil
 	}
-	qf := f128FromUint64(1).sub(pf) // 1-p
-	pq := pf.div(qf)                // p/(1-p)
-	pmf0 := qf.intPow(money)        // (1-p)^money
+	qf := f128FromUint64(totalMoney - expectedSize).div(f128FromUint64(totalMoney))   // 1-p
+	pq := f128FromUint64(expectedSize).div(f128FromUint64(totalMoney - expectedSize)) // p/(1-p)
+	pmf0 := qf.intPow(money)                                                          // (1-p)^money
 	return &binomialF128{money: money, pq: pq, pmf: pmf0, cum: pmf0, at: 0}
 }
 
@@ -600,9 +512,9 @@ func (b *binomialF128) cdf(j uint64) f128 {
 //	C++  sortition.cpp                            Go  this function
 //	------------------------------------------    -------------------------------------------
 //	uint64_t sortition_binomial_cdf_walk(         func binomialCDFWalkF128(
-//	    double n, double p, double ratio,             p float64, ratio f128, money uint64) uint64 {
-//	    uint64_t money) {
-//	  binomial_distribution<double> dist(n, p);     dist := newBinomialF128(p, money)
+//	    double n, double p, double ratio,             expectedSize, totalMoney uint64,
+//	    uint64_t money) {                             ratio f128, money uint64) uint64 {
+//	  binomial_distribution<double> dist(n, p);     dist := newBinomialF128(expectedSize, totalMoney, money)
 //	  for (uint64_t j = 0; j < money; j++) {        for j := uint64(0); j < money; j++ {
 //	    double boundary = cdf(dist, j);               boundary := dist.cdf(j)
 //	    if (ratio <= boundary) {                      if ratio.cmp(boundary) <= 0 {
@@ -615,7 +527,8 @@ func (b *binomialF128) cdf(j uint64) f128 {
 // Boost computes cdf(dist, j) = ibetac(j+1, n-j, p) afresh each step in hardware
 // double, whereas dist.cdf(j) returns the same mathematical value as a running
 // PMF sum in software f128 (see binomialF128). The f128 path also receives the
-// digest ratio directly at f128 precision.
+// digest ratio directly at f128 precision, and the success probability as its
+// exact integer numerator and denominator rather than a float64 quotient.
 //
 // Precondition: money is within the sortition domain -- at most the total online
 // microalgo supply (~10^16 < 2^54). The f128 exponent is a plain int; for money
@@ -624,8 +537,8 @@ func (b *binomialF128) cdf(j uint64) f128 {
 // supply (>~2^57) is outside the domain -- Boost's Select cannot evaluate it
 // either -- and would eventually overflow the int exponent; behavior is undefined
 // there.
-func binomialCDFWalkF128(p float64, ratio f128, money uint64) uint64 {
-	dist := newBinomialF128(p, money)
+func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint64) uint64 {
+	dist := newBinomialF128(expectedSize, totalMoney, money)
 	if dist == nil { // p >= 1: cdf(j)==0 for j<money, cdf(money)==1
 		if ratio.isZero() {
 			return 0
