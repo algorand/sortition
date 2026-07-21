@@ -58,3 +58,15 @@ func TestSortitionBasic(t *testing.T) {
 		t.Errorf("wanted %d selections but got %d, d=%d, maxd=%d", expected, hitcount, d, maxd)
 	}
 }
+
+// TestSelectF128MaxMoneyHeadroom is a tripwire on the exported domain bound:
+// it must comfortably cover the 10^16 microalgo supply. Consumers are expected
+// to run the mirror-image check (their maximum stake against
+// SelectF128MaxMoney) in their own test suites.
+func TestSelectF128MaxMoneyHeadroom(t *testing.T) {
+	const mainnetSupply = uint64(10_000_000_000_000_000)
+	if SelectF128MaxMoney < 8*mainnetSupply {
+		t.Fatalf("SelectF128MaxMoney=%d leaves less than 3 bits of headroom over the %d supply",
+			SelectF128MaxMoney, mainnetSupply)
+	}
+}

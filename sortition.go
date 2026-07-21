@@ -58,9 +58,20 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 	return uint64(C.sortition_binomial_cdf_walk(C.double(binomialN), C.double(binomialP), C.double(cratio), C.uint64_t(money)))
 }
 
+// SelectF128MaxMoney bounds SelectF128's money argument. Below it, every
+// exponent in the f128 walk fits int64 even at the most extreme representable
+// probability (1-p is at least 2^-64 for any expectedSize < totalMoney, so
+// |exp| <= 64*(money-1) < 2^63). The bound leaves ~8 bits of headroom over
+// Algorand's 10^16 microalgo supply; behavior above it is undefined, and
+// SelectF128 does not check it at runtime. Consumers should assert their
+// supply invariants against this constant in a test, so a future economics
+// change fails loudly there instead of silently misrounding consensus.
+const SelectF128MaxMoney = uint64(1) << 57
+
 // SelectF128 is a deterministic sortition function. It evaluates both the VRF
 // ratio and binomial CDF at f128 precision using software integer arithmetic, so
-// its result is bit-reproducible across platforms.
+// its result is bit-reproducible across platforms. money must be below
+// SelectF128MaxMoney.
 //
 // Unlike Select, SelectF128 takes the committee size as the exact uint64 it is
 // in the protocol rather than a float64. The distribution constants are then
