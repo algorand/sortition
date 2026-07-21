@@ -41,7 +41,10 @@ import (
 // TestSelectF128RatioExactlyOne and the SelectF128 doc comment).
 type f128 struct {
 	hi, lo uint64
-	exp    int
+	// exp is explicitly 64-bit: int is 32 bits on 386/arm, and a
+	// platform-sized exponent would make cross-GOARCH bit-identity depend on
+	// exponents staying small rather than on the type.
+	exp int64
 }
 
 // f128MantBits is the f128 mantissa width. The big.Float oracle in the test
@@ -140,7 +143,7 @@ func shl256(a3, a2, a1, a0 uint64, n uint) (uint64, uint64, uint64, uint64) {
 
 // norm128 normalizes a 128-bit mantissa (shifts MSB to bit 127). No bits are
 // dropped, so no rounding is needed; used for exact conversions.
-func norm128(hi, lo uint64, exp int) f128 {
+func norm128(hi, lo uint64, exp int64) f128 {
 	if hi == 0 && lo == 0 {
 		return f128{}
 	}
@@ -152,7 +155,7 @@ func norm128(hi, lo uint64, exp int) f128 {
 	}
 	if s != 0 {
 		hi, lo = shl128(hi, lo, uint(s))
-		exp -= s
+		exp -= int64(s)
 	}
 	return f128{hi, lo, exp}
 }
@@ -160,7 +163,7 @@ func norm128(hi, lo uint64, exp int) f128 {
 // roundNE rounds the normalized 128-bit mantissa hi:lo to nearest, ties to even,
 // given the round bit and sticky of the discarded tail, and renormalizes on
 // carry-out. hi:lo must already be normalized (bit 127 set).
-func roundNE(hi, lo uint64, roundBit, sticky bool, exp int) f128 {
+func roundNE(hi, lo uint64, roundBit, sticky bool, exp int64) f128 {
 	if roundBit && (sticky || lo&1 != 0) {
 		var c uint64
 		lo, c = bits.Add64(lo, 1, 0)
@@ -174,7 +177,7 @@ func roundNE(hi, lo uint64, roundBit, sticky bool, exp int) f128 {
 
 // norm192 rounds a 192-bit value (r2:r1:r0) * 2^exp to an f128 (top 128 bits,
 // round to nearest even using the remaining bits).
-func norm192(r2, r1, r0 uint64, exp int) f128 {
+func norm192(r2, r1, r0 uint64, exp int64) f128 {
 	if r2 == 0 && r1 == 0 && r0 == 0 {
 		return f128{}
 	}
@@ -190,7 +193,7 @@ func norm192(r2, r1, r0 uint64, exp int) f128 {
 	s2, s1, s0 := shl192(r2, r1, r0, uint(lz))
 	roundBit := s0&(1<<63) != 0
 	sticky := s0&^(uint64(1)<<63) != 0
-	return roundNE(s2, s1, roundBit, sticky, exp+64-lz)
+	return roundNE(s2, s1, roundBit, sticky, exp+64-int64(lz))
 }
 
 func f128FromUint64(u uint64) f128 {
@@ -198,7 +201,7 @@ func f128FromUint64(u uint64) f128 {
 		return f128{}
 	}
 	s := bits.LeadingZeros64(u)
-	return f128{u << uint(s), 0, -(s + 64)}
+	return f128{u << uint(s), 0, -int64(s) - 64}
 }
 
 // f128FromDigestRatio returns digest/(2^256-1), rounded to nearest-even at
@@ -234,7 +237,7 @@ func f128FromDigestRatio(d Digest) f128 {
 	if roundBit && !sticky {
 		sticky = true
 	}
-	return roundNE(n3, n2, roundBit, sticky, -128-leading)
+	return roundNE(n3, n2, roundBit, sticky, -128-int64(leading))
 }
 
 // mul returns a*b rounded to nearest even.
@@ -391,10 +394,12 @@ func (a f128) add(b f128) f128 {
 	if a.exp < b.exp {
 		a, b = b, a
 	}
-	diff := uint(a.exp - b.exp)
-	if diff > 128 {
+	// Compare in int64 before converting to a shift count: uint is 32-bit on
+	// 386/arm, where a large exponent difference would otherwise truncate.
+	if a.exp-b.exp > 128 {
 		return a // b is below the round bit
 	}
+	diff := uint(a.exp - b.exp)
 	bhi, blo, round, sticky := shr128gs(b.hi, b.lo, diff)
 	slo, c := bits.Add64(a.lo, blo, 0)
 	shi, c2 := bits.Add64(a.hi, bhi, c)
