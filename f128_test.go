@@ -156,6 +156,41 @@ func FuzzSelectF128(f *testing.F) {
 	})
 }
 
+// TestF128PrimitiveEdges pins the defensive arms of the shift and comparison
+// primitives that no production caller reaches (norm128 only shifts by
+// 1..127, and CDF boundaries are never zero, so neither the walk nor the
+// differential harnesses can cover them). They are total functions with
+// defined answers; assert them directly. The one remaining uncoverable branch
+// is divStep's add-back, which is unreachable under any inputs (see the
+// comment there).
+func TestF128PrimitiveEdges(t *testing.T) {
+	if hi, lo := shl128(5, 7, 0); hi != 5 || lo != 7 {
+		t.Fatalf("shl128 by 0: got %d,%d", hi, lo)
+	}
+	if hi, lo := shl128(5, 7, 128); hi != 0 || lo != 0 {
+		t.Fatalf("shl128 by 128: got %d,%d", hi, lo)
+	}
+	if hi, lo := shr128(5, 7, 200); hi != 0 || lo != 0 {
+		t.Fatalf("shr128 by 200: got %d,%d", hi, lo)
+	}
+	if !f128FromUint64(0).isZero() {
+		t.Fatal("f128FromUint64(0) is not zero")
+	}
+	one := f128FromUint64(1)
+	if c := (f128{}).cmp(f128{}); c != 0 {
+		t.Fatalf("cmp(0,0) = %d, want 0", c)
+	}
+	if c := one.cmp(f128{}); c != 1 {
+		t.Fatalf("cmp(1,0) = %d, want 1", c)
+	}
+	if c := (f128{}).cmp(one); c != -1 {
+		t.Fatalf("cmp(0,1) = %d, want -1", c)
+	}
+	if c := one.cmp(one); c != 0 {
+		t.Fatalf("cmp(1,1) = %d, want 0", c)
+	}
+}
+
 // TestF128AgreesWithCurrent checks broad agreement with the deployed
 // Boost-double implementation. Knife-edge differences remain expected because
 // SelectF128 uses an f128 digest ratio and CDF.
