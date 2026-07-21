@@ -33,7 +33,11 @@ import (
 // The 128-bit mantissa is normalized so bit 127 (the MSB of hi) is set, or the
 // value is zero (hi==lo==0). All sortition quantities (p, 1-p, ratio, pmf, cdf,
 // factors) are >= 0, so there is no sign bit. Arithmetic ROUNDS TO NEAREST, TIES
-// TO EVEN (matching math/big.Float).
+// TO EVEN (matching math/big.Float). Round-to-nearest is required, not merely
+// nicer: the ratio is exactly 1.0 for the all-0xff digest (and any digest with
+// >= 129 leading one bits rounds there), and only round-to-nearest lets the
+// accumulated cdf reach exactly 1.0 -- truncation asymptotes just below it and
+// the walk runs to `money` (see TestSelectF128RatioExactlyOne).
 type f128 struct {
 	hi, lo uint64
 	exp    int

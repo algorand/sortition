@@ -107,13 +107,15 @@ func FuzzSelectF128(f *testing.F) {
 	f.Add(uint64(1141), uint64(1000), 250.0, seedVRF)
 	f.Add(uint64(0), uint64(2_000_000_000_000_000), 20.0, make([]byte, 32))
 	f.Add(uint64(1000), uint64(1000), 1000.0, make([]byte, 32))
+	// all-0xff digest: ratio is exactly 1.0, the cdf-reaches-1.0 regime
+	f.Add(uint64(1954), uint64(1_999_999_999_999_964), 1500.0, bytes.Repeat([]byte{0xff}, 32))
 
 	f.Fuzz(func(t *testing.T, money, total uint64, expected float64, vrf []byte) {
 		if total == 0 || math.IsNaN(expected) || math.IsInf(expected, 0) ||
 			expected < 0 || expected > float64(total) {
 			return
 		}
-		money %= 3001
+		money %= 3001 // bound the walk so each fuzz exec stays fast
 		var d Digest
 		copy(d[:], vrf)
 		got := SelectF128(money, total, expected, d)
@@ -229,6 +231,39 @@ func TestSelectF128NearMaximumDigest(t *testing.T) {
 	got := SelectF128(1954, 1_999_999_999_999_964, 1500, d)
 	if got != 1 {
 		t.Fatalf("SelectF128=%d, want 1 for exact near-maximum digest ratio", got)
+	}
+}
+
+// TestSelectF128RatioExactlyOne pins the walk when the f128 ratio is exactly
+// 1.0: mathematically for the all-0xff digest, and by 128-bit rounding for any
+// digest with at least 129 leading one bits. The walk terminates early only
+// because round-to-nearest lets the accumulated cdf reach exactly 1.0 (see the
+// f128 doc comment); with truncation the cdf would stay below 1.0 forever and
+// the walk would run all the way to money.
+func TestSelectF128RatioExactlyOne(t *testing.T) {
+	one := f128FromUint64(1)
+
+	var maximum Digest
+	for i := range maximum {
+		maximum[i] = 0xff
+	}
+	var manyLeadingOnes Digest
+	for i := 0; i < 17; i++ { // 136 leading one bits
+		manyLeadingOnes[i] = 0xff
+	}
+
+	for _, d := range []Digest{maximum, manyLeadingOnes} {
+		if f128FromDigestRatio(d).cmp(one) != 0 {
+			t.Fatalf("digest %x: ratio is not exactly 1.0", d)
+		}
+		got := SelectF128(1954, 1_999_999_999_999_964, 1500, d)
+		want := selectBigOracle(1954, 1_999_999_999_999_964, 1500, d)
+		if got != want {
+			t.Fatalf("digest %x: SelectF128=%d != oracle=%d", d, got, want)
+		}
+		if got != 3 {
+			t.Fatalf("digest %x: SelectF128=%d, want 3 (cdf reaches exactly 1.0 in the near tail)", d, got)
+		}
 	}
 }
 

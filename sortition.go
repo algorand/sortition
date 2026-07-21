@@ -70,6 +70,15 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // to 1.0 in float64. Generic CDF-boundary differences can still change a
 // selection by one, so replacing Select with SelectF128 remains a protocol-gated,
 // network-coordinated consensus change.
+//
+// One tail edge: the top ~2^-129 of digest space rounds to an f128 ratio of
+// exactly 1.0, which sits at or above every cdf(j) for j < money. There the walk
+// falls through and returns money (the whole trial count) -- the exact-math value,
+// since cdf(j) < 1 for all j < money and cdf(money) == 1 -- whereas Boost's double
+// cdf saturates to 1.0 early and returns a small count. So at those inputs the
+// divergence can be as large as money vs. a few; they are cryptographically
+// unreachable (a VRF hash in the top 2^-129), so this is a documented property,
+// not a case worth special-casing.
 func SelectF128(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Digest) uint64 {
 	binomialP := expectedSize / float64(totalMoney)
 	ratio := f128FromDigestRatio(vrfOutput)
