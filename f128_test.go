@@ -384,27 +384,76 @@ func TestDivVsBig(t *testing.T) {
 	}
 }
 
-// TestSelectF128FrozenTailReturnsMoney pins the walk's stagnation
-// short-circuit and the documented stuck-band count at supply-sized money.
-// pmf(0)'s trial-count-amplified rounding leaves the accumulated CDF at a
-// plateau ~2^-78 below 1 for money == totalMoney == 2e15, so this digest
-// (2^256-1-2^176, ratio ~1-2^-80) sits above every boundary: the plain walk
-// would grind through all 2e15 no-op iterations (hours) before returning
-// money. The short-circuit must return the same money immediately -- this
-// test completing at all is the liveness assertion. The oracle is not
-// consulted here because it has no short-circuit and would walk the full 2e15
-// steps; FuzzSelectF128 continuously validates short-circuit == full walk at
-// fuzzable money, where the oracle does complete, as do the fall-through
-// cases in TestSelectF128RatioExactlyOne.
-func TestSelectF128FrozenTailReturnsMoney(t *testing.T) {
-	const supply = uint64(2_000_000_000_000_000)
+// maxDigestMinusPowerOfTwo returns the digest integer 2^256-1-2^bit.
+func maxDigestMinusPowerOfTwo(bit uint) Digest {
 	var d Digest
 	for i := range d {
 		d[i] = 0xff
 	}
-	d[9] = 0xfe // clear bit 176: digest 2^256-1-2^176, ratio ~= 1 - 2^-80
-	if got := SelectF128(supply, supply, 1500, d); got != supply {
-		t.Fatalf("SelectF128=%d, want money=%d for a ratio above the CDF plateau", got, supply)
+	d[len(d)-1-int(bit/8)] &^= byte(1) << (bit % 8)
+	return d
+}
+
+// TestSelectF128CurrentConsensusFrozenTail pins the accepted frozen-tail
+// behavior at values admitted by current go-algorand consensus parameters.
+// Consensus v41 inherits NumProposers=20, NextCommitteeSize=5000, and
+// MinBalance=100,000 microalgos. Its payout-eligibility interval is 30,000
+// through 70,000,000 Algos, and the mainnet genesis supply is 10,000,000,000
+// Algos. The payout maximum is not a voting-stake cap--online accounts above
+// it can still take part in consensus--so the cases cover a proposer plus the
+// base account minimum, both payout landmarks, and the supply ceiling.
+//
+// In every case q=(1-p) rounds downward. Raising q to money scales every PMF
+// term down enough that the accumulated f128 CDF freezes below the chosen
+// digest ratio. SelectF128 defines this interval to return money; completion
+// is also the liveness assertion, since the unshortened walk would perform up
+// to money no-op iterations. The deployed Boost walk does not share the
+// plateau: the digest rounds to binary64 1.0, and its independently evaluated
+// CDF reaches 1.0 at the finite values pinned in boostWant.
+func TestSelectF128CurrentConsensusFrozenTail(t *testing.T) {
+	const (
+		mainnetSupply = uint64(10_000_000_000_000_000)
+	)
+	tests := []struct {
+		name      string
+		money     uint64
+		total     uint64
+		expected  uint64
+		clearBit  uint
+		boostWant uint64
+	}{
+		{"proposer committee", 1_999_999_999_999_999, 1_999_999_999_999_999, 20, 175, 67},
+		{"base minimum balance", 100_000, mainnetSupply, 5_000, 141, 2},
+		{"payout minimum balance", 30_000_000_000, mainnetSupply, 5_000, 159, 6},
+		{"payout maximum balance", 70_000_000_000_000, mainnetSupply, 5_000, 170, 94},
+		{"mainnet supply ceiling", mainnetSupply, mainnetSupply, 5_000, 178, 5_598},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			d := maxDigestMinusPowerOfTwo(test.clearBit)
+			if got := SelectF128(test.money, test.total, test.expected, d); got != test.money {
+				t.Fatalf("SelectF128=%d, want money=%d for a ratio above the CDF plateau", got, test.money)
+			}
+			if got := Select(test.money, test.total, float64(test.expected), d); got != test.boostWant {
+				t.Fatalf("Boost Select=%d, want finite tail count %d", got, test.boostWant)
+			}
+		})
+	}
+}
+
+// TestSelectF128FrozenTailReportedCase retains the original supply-sized
+// reproducer: pmf(0)'s trial-count-amplified rounding leaves the accumulated
+// CDF around 2^-78 below 1 when money == totalMoney == 2e15 and committee size
+// is the current certification size 1500. The ratio 1-2^-80 is above that
+// plateau, while Boost terminates at its binary64 tail boundary.
+func TestSelectF128FrozenTailReportedCase(t *testing.T) {
+	const onlineStake = uint64(2_000_000_000_000_000)
+	d := maxDigestMinusPowerOfTwo(176) // ratio ~= 1 - 2^-80
+	if got := SelectF128(onlineStake, onlineStake, 1500, d); got != onlineStake {
+		t.Fatalf("SelectF128=%d, want money=%d for a ratio above the CDF plateau", got, onlineStake)
+	}
+	if got := Select(onlineStake, onlineStake, 1500, d); got != 1832 {
+		t.Fatalf("Boost Select=%d, want finite tail count 1832", got)
 	}
 
 	// The all-0xff digest (ratio exactly 1.0) is also above this
@@ -412,7 +461,7 @@ func TestSelectF128FrozenTailReturnsMoney(t *testing.T) {
 	for i := range d {
 		d[i] = 0xff
 	}
-	if got := SelectF128(supply, supply, 1500, d); got != supply {
-		t.Fatalf("SelectF128=%d, want money=%d for ratio exactly 1.0 at supply-sized money", got, supply)
+	if got := SelectF128(onlineStake, onlineStake, 1500, d); got != onlineStake {
+		t.Fatalf("SelectF128=%d, want money=%d for ratio exactly 1.0", got, onlineStake)
 	}
 }

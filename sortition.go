@@ -96,24 +96,34 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // grid, potentially at a different (typically earlier) j. At these near-maximum
 // digests the two implementations can therefore return wildly different counts:
 // one may stop within a few steps of the binomial tail while the other returns
-// the full trial count money. Such inputs are cryptographically unreachable (a
-// VRF hash in the top 2^-129), so this is a documented property, not a case
-// worth special-casing.
+// the full trial count money. A uniform VRF output lands in this interval with
+// probability about 2^-129 per credential. The event is possible, but the
+// consensus threat model treats it as negligible and assumes the registered
+// key and unpredictable seed prevent an adversary from targeting it. This is
+// therefore a documented statistical edge rather than a case special-cased by
+// the implementation.
 //
 // The same holds in a wider sliver just below 1.0. pmf(0) = (1-p)^money
 // amplifies the 2^-129 rounding of 1-p by up to the trial count, and pmf(0)
 // scales every PMF term, so the accumulated CDF settles at a plateau that can
-// sit as much as ~money*2^-129 below 1 (~2^-78 when money is the whole
-// supply). A digest ratio between that plateau and 1.0 sits above every
-// boundary without rounding to 1.0; the walk detects the frozen CDF and
-// immediately returns money, the same result the plain walk would reach after
-// up to money no-op iterations (hours at supply-sized money). Reaching the
-// sliver requires a VRF hash within ~2^-78 of the maximum, which cannot be
-// ground for -- the output is fixed by the registered key and seed -- so the
-// count there is DEFINED as money rather than the exact binomial-tail
-// crossing. (Computing pmf(0) with 64 guard bits would shrink the sliver to
-// ~2^-116 and make it return the tail crossing; that variant lives on the
-// sortition-f128-pmf192 branch if the trade is ever wanted.)
+// sit as much as ~money*2^-129 below 1 (~2^-78 at 2e15 microalgos of stake,
+// and ~2^-76 at the 10^16-microalgo mainnet supply ceiling). A digest ratio
+// between that plateau and 1.0 sits above every boundary without rounding to
+// 1.0; the walk detects the frozen CDF and immediately returns money, the same
+// result the plain walk would reach after up to money no-op iterations.
+//
+// These outputs are possible under current go-algorand committee and balance
+// bounds; TestSelectF128CurrentConsensusFrozenTail pins examples from the base
+// account minimum through the mainnet supply ceiling. For an account with
+// stake m, the affected interval is approximately m*2^-129, and summing that
+// first-order bound over all online accounts gives approximately
+// totalMoney*2^-129 per committee selection, independent of how stake is
+// split. The consensus rationale for accepting the edge is probabilistic, not
+// impossibility: registered keys and an unpredictable seed are assumed to
+// prevent targeting the interval. Within it the count is DEFINED as money
+// rather than the exact binomial-tail crossing. Computing pmf(0) with guard
+// bits could narrow the interval, at the cost of additional consensus-critical
+// arithmetic and audit surface.
 func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
 	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)
