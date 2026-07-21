@@ -299,7 +299,6 @@ func TestSelectF128BoundaryStraddle(t *testing.T) {
 	rng := rand.New(rand.NewSource(8))
 	den := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 	denF := new(big.Float).SetPrec(600).SetInt(den)
-	ulp := new(big.Int).Lsh(big.NewInt(1), 128) // one 128-bit ratio ulp in digest units
 
 	for iter := 0; iter < 150; iter++ {
 		money := 2 + rng.Uint64()%250
@@ -308,12 +307,25 @@ func TestSelectF128BoundaryStraddle(t *testing.T) {
 		boundaries := []uint64{0, money / 2, money - 1, rng.Uint64() % money}
 		for _, j := range boundaries {
 			c := oracleCDFAt(money, total, expected, j)
+			// One f128 ulp at c's own magnitude, in digest units: the ulp is
+			// 2^(exp-128) for c in [2^(exp-1), 2^exp), so it scales with the
+			// boundary -- a fixed 2^128 step would be one ulp only for c in
+			// [0.5, 1) and many ulps for small boundaries like a large-mean
+			// cdf(0). Clamp to one digest unit when the ulp is finer than the
+			// digest grid.
+			step := new(big.Int).Rsh(den, uint(128-c.MantExp(nil)))
+			if step.Sign() == 0 {
+				step.SetInt64(1)
+			}
 			tt, _ := new(big.Float).SetPrec(600).Mul(c, denF).Int(nil)
 			prev := uint64(0)
 			first := true
+			clamped := false
+			var loRatio, hiRatio *big.Float
 			for k := int64(-2); k <= 2; k++ {
-				ti := new(big.Int).Add(tt, new(big.Int).Mul(big.NewInt(k), ulp))
+				ti := new(big.Int).Add(tt, new(big.Int).Mul(big.NewInt(k), step))
 				if ti.Sign() < 0 || ti.Cmp(den) > 0 {
+					clamped = true
 					continue
 				}
 				var d Digest
@@ -329,6 +341,18 @@ func TestSelectF128BoundaryStraddle(t *testing.T) {
 						j, prev, got, money, total, expected)
 				}
 				prev, first = got, false
+				if loRatio == nil {
+					loRatio = digestRatioBig(d, f128MantBits)
+				}
+				hiRatio = digestRatioBig(d, f128MantBits)
+			}
+			// The candidates must genuinely bracket the boundary (this is
+			// what makes it a straddle rather than ordinary sampling); only
+			// checkable when no candidate was clamped away at 0 or the
+			// maximum digest.
+			if !clamped && (loRatio.Cmp(c) > 0 || hiRatio.Cmp(c) < 0) {
+				t.Fatalf("straddle window does not bracket boundary j=%d: [%v, %v] vs cdf=%v (money=%d total=%d expected=%d)",
+					j, loRatio, hiRatio, c, money, total, expected)
 			}
 		}
 	}
