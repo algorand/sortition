@@ -93,6 +93,9 @@ func main() {
 		"test", "-count=1",
 		"-run", "TestF128Digest|TestF128Primitive|TestDivUVsBig|TestDivVsBig|TestSelectF128|TestRapid|Fuzz",
 		"-rapid.checks=2000",
+		// killed mutants fail the rapid tests by design; don't litter
+		// testdata/rapid with failfiles for them
+		"-rapid.nofailfile",
 	}
 
 	src := string(orig)
