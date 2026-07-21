@@ -297,6 +297,11 @@ func TestSelectF128RatioExactlyOne(t *testing.T) {
 func FuzzF128Ops(f *testing.F) {
 	f.Add(uint64(1)<<63, uint64(0), 0, uint64(3)<<62, uint64(0), 0, uint64(7))
 	f.Add(uint64(0), uint64(0), 0, uint64(1)<<63, uint64(1), -5, uint64(1))
+	// Large divisors: go's mutator only explores integers near corpus values,
+	// so without these seeds ~30M execs never left the small-u neighborhood
+	// and missed divU's shallow-quotient misrounding (u > ~2^62).
+	f.Add(uint64(1)<<63|12345, uint64(67890), 3, uint64(1)<<63, uint64(1), 0, uint64(1)<<63|54321)
+	f.Add(uint64(1)<<63|999, uint64(777), -9, uint64(1)<<63, uint64(1), 0, uint64(5)<<61|33)
 	f.Fuzz(func(t *testing.T, ahi, alo uint64, aexp int, bhi, blo uint64, bexp int, u uint64) {
 		a := norm128(ahi, alo, int64(aexp%4000-2000))
 		b := norm128(bhi, blo, int64(bexp%4000-2000))
@@ -392,6 +397,31 @@ func maxDigestMinusPowerOfTwo(bit uint) Digest {
 	}
 	d[len(d)-1-int(bit/8)] &^= byte(1) << (bit % 8)
 	return d
+}
+
+// TestDivUVsBig checks divU against a 128-bit round-nearest-even big.Float
+// divide across divisor magnitudes. The log-spread divisor matters: the
+// shallow-quotient region (u > ~2^62, where the quotient has at most 129
+// significant bits) is unreachable from the sortition walk, whose divisor is
+// the step index bounded by money, but the round-to-nearest-even contract
+// covers it, and a previous divU broke there by folding the remainder's
+// sticky marker into a digit that landed in or at the rounding position.
+func TestDivUVsBig(t *testing.T) {
+	rng := rand.New(rand.NewSource(5))
+	for i := 0; i < 2_000_000; i++ {
+		a := f128{rng.Uint64() | 1<<63, rng.Uint64(), int64(rng.Intn(4000) - 2000)}
+		u := rng.Uint64() >> uint(rng.Intn(64)) // log-spread magnitudes
+		if u == 0 {
+			continue
+		}
+		got := f128ToBig(a.divU(u))
+		want := new(big.Float).SetPrec(f128MantBits).Quo(
+			f128ToBig(a), new(big.Float).SetPrec(f128MantBits).SetUint64(u))
+		if got.Cmp(want) != 0 {
+			t.Fatalf("divU mismatch: a={%#x,%#x,%d} u=%d got=%s want=%s",
+				a.hi, a.lo, a.exp, u, got.Text('p', 0), want.Text('p', 0))
+		}
+	}
 }
 
 // TestSelectF128CurrentConsensusFrozenTail pins the accepted frozen-tail

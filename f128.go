@@ -104,24 +104,6 @@ func shr128gs(hi, lo uint64, n uint) (rhi, rlo uint64, round, sticky bool) {
 	return rhi, rlo, round, sticky
 }
 
-// shl192 shifts a 192-bit value (a2:a1:a0) left by n < 192.
-func shl192(a2, a1, a0 uint64, n uint) (uint64, uint64, uint64) {
-	switch {
-	case n == 0:
-		return a2, a1, a0
-	case n < 64:
-		return a2<<n | a1>>(64-n), a1<<n | a0>>(64-n), a0 << n
-	case n < 128:
-		n -= 64
-		if n == 0 {
-			return a1, a0, 0
-		}
-		return a1<<n | a0>>(64-n), a0 << n, 0
-	default:
-		return a0 << (n - 128), 0, 0
-	}
-}
-
 // shl256 shifts a 256-bit value (a3:a2:a1:a0) left by n < 256.
 func shl256(a3, a2, a1, a0 uint64, n uint) (uint64, uint64, uint64, uint64) {
 	words := n / 64
@@ -173,27 +155,6 @@ func roundNE(hi, lo uint64, roundBit, sticky bool, exp int64) f128 {
 		}
 	}
 	return f128{hi, lo, exp}
-}
-
-// norm192 rounds a 192-bit value (r2:r1:r0) * 2^exp to an f128 (top 128 bits,
-// round to nearest even using the remaining bits).
-func norm192(r2, r1, r0 uint64, exp int64) f128 {
-	if r2 == 0 && r1 == 0 && r0 == 0 {
-		return f128{}
-	}
-	var lz int
-	switch {
-	case r2 != 0:
-		lz = bits.LeadingZeros64(r2)
-	case r1 != 0:
-		lz = 64 + bits.LeadingZeros64(r1)
-	default:
-		lz = 128 + bits.LeadingZeros64(r0)
-	}
-	s2, s1, s0 := shl192(r2, r1, r0, uint(lz))
-	roundBit := s0&(1<<63) != 0
-	sticky := s0&^(uint64(1)<<63) != 0
-	return roundNE(s2, s1, roundBit, sticky, exp+64-int64(lz))
 }
 
 func f128FromUint64(u uint64) f128 {
@@ -270,20 +231,36 @@ func (a f128) mul(b f128) f128 {
 	return roundNE(hi, lo, roundBit, sticky, a.exp+b.exp+127)
 }
 
-// divU returns a/u for a small unsigned integer u (the per-step denominator j),
-// rounded to nearest even.
+// divU returns a/u for an unsigned integer u (the walk's per-step denominator
+// j), rounded to nearest even.
 func (a f128) divU(u uint64) f128 {
 	if a.isZero() || u == 0 {
 		return f128{}
 	}
-	// (M/u)*2^64 = q2:q1:q0 (integer part q2:q1, next 64 frac bits q0).
-	q2, r := bits.Div64(0, a.hi, u)
-	q1, r := bits.Div64(r, a.lo, u)
+	// 256-bit quotient (M/u)*2^128 = q3:q2:q1:q0 by long division. Two full
+	// fraction digits below the mantissa keep the round bit inside the
+	// computed digits even for the shallowest quotient (u > a.hi, where the
+	// quotient has only 128 significant bits), so the remainder only ever
+	// contributes to sticky, strictly below the round bit. (A 192-bit
+	// quotient with the remainder OR'd into its last digit is NOT enough:
+	// for u > ~2^62 that marker lands in the mantissa or at the round bit
+	// and breaks round-to-nearest-even about half the time.)
+	q3, r := bits.Div64(0, a.hi, u)
+	q2, r := bits.Div64(r, a.lo, u)
+	q1, r := bits.Div64(r, 0, u)
 	q0, rem := bits.Div64(r, 0, u)
-	if rem != 0 {
-		q0 |= 1 // mark sticky for the division remainder
+	// M >= 2^127 and u < 2^64 make the quotient >= 2^191, so at most 64
+	// leading zeros: the mantissa always comes from o3:o2 below.
+	var lz int
+	if q3 != 0 {
+		lz = bits.LeadingZeros64(q3)
+	} else {
+		lz = 64
 	}
-	return norm192(q2, q1, q0, a.exp-64)
+	o3, o2, o1, o0 := shl256(q3, q2, q1, q0, uint(lz))
+	round := o1&(uint64(1)<<63) != 0
+	sticky := o1&^(uint64(1)<<63) != 0 || o0 != 0 || rem != 0
+	return roundNE(o3, o2, round, sticky, a.exp-int64(lz))
 }
 
 // divStep is one digit step of Knuth's Algorithm D for a normalized (top bit
@@ -553,13 +530,11 @@ func (b *binomialF128) cdf(j uint64) f128 {
 // digest ratio directly at f128 precision, and the success probability as its
 // exact integer numerator and denominator rather than a float64 quotient.
 //
-// Precondition: money is within the sortition domain -- at most the total online
-// microalgo supply (~10^16 < 2^54). The f128 exponent is a plain int; for money
-// in that range the exponent of (1-p)^money cannot overflow it (its magnitude is
-// bounded by roughly the mean money*p, a committee size). money far beyond the
-// supply (>~2^57) is outside the domain -- Boost's Select cannot evaluate it
-// either -- and would eventually overflow the int exponent; behavior is undefined
-// there.
+// Precondition: money < SelectF128MaxMoney (2^57). Below that bound every
+// exponent in the walk fits int64 even at the most extreme representable
+// probability: 1-p is at least 2^-64, so |exp| <= 64*(money-1) < 2^63. The
+// bound leaves ~8 bits of headroom over the ~10^16 microalgo supply; behavior
+// beyond it is undefined (Boost's Select cannot evaluate such money either).
 func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint64) uint64 {
 	dist := newBinomialF128(expectedSize, totalMoney, money)
 	if dist == nil { // p >= 1: cdf(j)==0 for j<money, cdf(money)==1
