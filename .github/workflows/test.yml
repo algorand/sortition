@@ -40,6 +40,7 @@ jobs:
     # band (the divU shallow-quotient bug reproduced within ~30 banded cases,
     # so 20000 leaves ample margin while staying under a few seconds).
     - name: Rapid property tests
+      shell: bash
       run: go test -v -run TestRapid ./... -args -rapid.checks=20000
 
   # Applies each curated single-site mutant of the f128 arithmetic and

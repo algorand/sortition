@@ -12,4 +12,4 @@ developer runbook for the deterministic sortition implementation.
 
 Please see the [COPYING_FAQ](COPYING_FAQ) for details about how to apply our license.
 
-Copyright (C) 2019-2023, Algorand Inc.
+Copyright (C) 2019-2026, Algorand Foundation Ltd.
