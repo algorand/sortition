@@ -43,6 +43,40 @@ jobs:
       shell: bash
       run: go test -v -run TestRapid ./... -args -rapid.checks=20000
 
+  # Cross-checks the "bit-identical on every platform" claim on a 32-bit-int
+  # target, where Go's int is 32 bits -- the reason f128.exp is explicitly
+  # int64. x86-64 runs i386 user code natively, so this needs no emulation;
+  # only a 32-bit C/C++ toolchain for the cgo/Boost build, which the Go
+  # toolchain invokes with -m32 automatically under GOARCH=386. armv7 (the
+  # Raspberry Pi target) has the same 32-bit int but would need slow QEMU, so
+  # 386 buys the same integer width for free.
+  test-386:
+    name: Tests (linux/386, native 32-bit)
+    runs-on: ubuntu-latest
+    env:
+      GOARCH: "386"
+      CGO_ENABLED: "1"
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+
+    - name: Install 32-bit C/C++ toolchain
+      run: sudo apt-get update && sudo apt-get install -y gcc-multilib g++-multilib
+
+    - name: Build
+      run: go build -v ./...
+
+    - name: Test
+      run: go test -v ./...
+
+    - name: Rapid property tests
+      shell: bash
+      run: go test -v -run TestRapid ./... -args -rapid.checks=20000
+
   # Applies each curated single-site mutant of the f128 arithmetic and
   # verifies the fast suite kills it (survivors marked equivalent carry
   # written proofs and are expected). This keeps the kill-rate claim true
