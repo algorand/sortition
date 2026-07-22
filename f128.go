@@ -1,0 +1,568 @@
+// Copyright (C) 2019-2026 Algorand Foundation Ltd.
+// This file is part of go-algorand
+//
+// go-algorand is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+//
+// go-algorand is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with go-algorand.  If not, see <https://www.gnu.org/licenses/>.
+
+package sortition
+
+import (
+	"encoding/binary"
+	"math/bits"
+)
+
+// f128 is a minimal NON-NEGATIVE binary floating-point value with a 128-bit
+// mantissa, used for a fast, allocation-free, deterministic binomial CDF (see
+// SelectF128). It is a value type -- arithmetic returns new f128s on the stack,
+// never the heap -- and uses only integer ops (math/bits), so it is bit-identical
+// on every platform (no hardware FP, no FMA, no libm).
+//
+//	value = (hi<<64 | lo) * 2^exp
+//
+// The 128-bit mantissa is normalized so bit 127 (the MSB of hi) is set, or the
+// value is zero (hi==lo==0). All sortition quantities (p, 1-p, ratio, pmf, cdf,
+// factors) are >= 0, so there is no sign bit. Arithmetic ROUNDS TO NEAREST, TIES
+// TO EVEN (matching math/big.Float), so every result is the correctly-rounded
+// 128-bit value -- this is what makes SelectF128 match the big.Float oracle.
+// It also shapes the ratio == 1.0 edge (all-0xff digest, or any digest with
+// >= 129 leading one bits): for some distributions the accumulated cdf rounds
+// up to exactly 1.0 at an early j and the walk stops there; in others it stays
+// below 1.0 for all j < money and the walk runs to money (see
+// TestSelectF128RatioExactlyOne and the SelectF128 doc comment).
+type f128 struct {
+	hi, lo uint64
+	// exp is explicitly 64-bit: int is 32 bits on 386/arm, and a
+	// platform-sized exponent would make cross-GOARCH bit-identity depend on
+	// exponents staying small rather than on the type.
+	exp int64
+}
+
+// f128MantBits is the f128 mantissa width. The big.Float oracle in the test
+// forms its constants at this same precision so they round to f128 exactly.
+const f128MantBits = 128
+
+func (a f128) isZero() bool { return a.hi == 0 && a.lo == 0 }
+
+func shl128(hi, lo uint64, n uint) (uint64, uint64) {
+	switch {
+	case n == 0:
+		return hi, lo
+	case n < 64:
+		return hi<<n | lo>>(64-n), lo << n
+	case n < 128:
+		return lo << (n - 64), 0
+	default:
+		return 0, 0
+	}
+}
+
+func shr128(hi, lo uint64, n uint) (uint64, uint64) {
+	switch {
+	case n == 0:
+		return hi, lo
+	case n < 64:
+		return hi >> n, lo>>n | hi<<(64-n)
+	case n < 128:
+		return 0, hi >> (n - 64)
+	default:
+		return 0, 0
+	}
+}
+
+// shr128gs shifts hi:lo right by n (1..128), returning the result plus the round
+// bit (the most-significant shifted-out bit, at position n-1) and sticky (any
+// lower shifted-out bit). Used for round-to-nearest on exponent alignment.
+func shr128gs(hi, lo uint64, n uint) (rhi, rlo uint64, round, sticky bool) {
+	rhi, rlo = shr128(hi, lo, n)
+	switch {
+	case n <= 64:
+		round = (lo>>(n-1))&1 != 0
+		if n >= 2 {
+			sticky = lo&((uint64(1)<<(n-1))-1) != 0
+		}
+	case n < 128:
+		m := n - 64
+		round = (hi>>(m-1))&1 != 0
+		if m >= 2 {
+			sticky = hi&((uint64(1)<<(m-1))-1) != 0
+		}
+		sticky = sticky || lo != 0
+	default: // n == 128
+		round = hi&(1<<63) != 0
+		sticky = (hi&^(uint64(1)<<63) != 0) || lo != 0
+	}
+	return rhi, rlo, round, sticky
+}
+
+// shl256 shifts a 256-bit value (a3:a2:a1:a0) left by n < 256.
+func shl256(a3, a2, a1, a0 uint64, n uint) (uint64, uint64, uint64, uint64) {
+	words := n / 64
+	shift := n % 64
+	in := [4]uint64{a3, a2, a1, a0}
+	var out [4]uint64
+	for i := 0; i < 4; i++ {
+		src := i + int(words)
+		if src >= len(in) {
+			break
+		}
+		out[i] = in[src] << shift
+		if shift != 0 && src+1 < len(in) {
+			out[i] |= in[src+1] >> (64 - shift)
+		}
+	}
+	return out[0], out[1], out[2], out[3]
+}
+
+// norm128 normalizes a 128-bit mantissa (shifts MSB to bit 127). No bits are
+// dropped, so no rounding is needed; used for exact conversions.
+func norm128(hi, lo uint64, exp int64) f128 {
+	if hi == 0 && lo == 0 {
+		return f128{}
+	}
+	var s int
+	if hi != 0 {
+		s = bits.LeadingZeros64(hi)
+	} else {
+		s = 64 + bits.LeadingZeros64(lo)
+	}
+	if s != 0 {
+		hi, lo = shl128(hi, lo, uint(s))
+		exp -= int64(s)
+	}
+	return f128{hi, lo, exp}
+}
+
+// roundNE rounds the normalized 128-bit mantissa hi:lo to nearest, ties to even,
+// given the round bit and sticky of the discarded tail, and renormalizes on
+// carry-out. hi:lo must already be normalized (bit 127 set).
+func roundNE(hi, lo uint64, roundBit, sticky bool, exp int64) f128 {
+	if roundBit && (sticky || lo&1 != 0) {
+		var c uint64
+		lo, c = bits.Add64(lo, 1, 0)
+		hi, c = bits.Add64(hi, 0, c)
+		if c != 0 { // mantissa overflowed to 2^128 -> renormalize to 2^127
+			return f128{1 << 63, 0, exp + 1}
+		}
+	}
+	return f128{hi, lo, exp}
+}
+
+func f128FromUint64(u uint64) f128 {
+	if u == 0 {
+		return f128{}
+	}
+	s := bits.LeadingZeros64(u)
+	return f128{u << uint(s), 0, -int64(s) - 64}
+}
+
+// f128FromDigestRatio returns digest/(2^256-1), rounded to nearest-even at
+// f128 precision, without reducing the digest to float64 first.
+func f128FromDigestRatio(d Digest) f128 {
+	w3 := binary.BigEndian.Uint64(d[0:8])
+	w2 := binary.BigEndian.Uint64(d[8:16])
+	w1 := binary.BigEndian.Uint64(d[16:24])
+	w0 := binary.BigEndian.Uint64(d[24:32])
+
+	var leading int
+	switch {
+	case w3 != 0:
+		leading = bits.LeadingZeros64(w3)
+	case w2 != 0:
+		leading = 64 + bits.LeadingZeros64(w2)
+	case w1 != 0:
+		leading = 128 + bits.LeadingZeros64(w1)
+	case w0 != 0:
+		leading = 192 + bits.LeadingZeros64(w0)
+	default:
+		return f128{}
+	}
+
+	n3, n2, n1, n0 := shl256(w3, w2, w1, w0, uint(leading))
+	roundBit := n1&(uint64(1)<<63) != 0
+	sticky := n1&^(uint64(1)<<63) != 0 || n0 != 0
+
+	// Dividing by 2^256 places the binary point directly after the digest.
+	// The real denominator is one smaller, so the exact ratio is slightly
+	// larger. That correction is at most one discarded-bit unit and changes
+	// rounding only when the 2^256 quotient is exactly halfway.
+	if roundBit && !sticky {
+		sticky = true
+	}
+	return roundNE(n3, n2, roundBit, sticky, -128-int64(leading))
+}
+
+// mul returns a*b rounded to nearest even.
+func (a f128) mul(b f128) f128 {
+	if a.isZero() || b.isZero() {
+		return f128{}
+	}
+	hhHi, hhLo := bits.Mul64(a.hi, b.hi)
+	hlHi, hlLo := bits.Mul64(a.hi, b.lo)
+	lhHi, lhLo := bits.Mul64(a.lo, b.hi)
+	llHi, llLo := bits.Mul64(a.lo, b.lo)
+	p0 := llLo
+	p1, cA := bits.Add64(llHi, hlLo, 0)
+	p1, cB := bits.Add64(p1, lhLo, 0)
+	cp1 := cA + cB
+	p2, cC := bits.Add64(hhLo, hlHi, 0)
+	p2, cD := bits.Add64(p2, lhHi, 0)
+	p2, cE := bits.Add64(p2, cp1, 0)
+	p3 := hhHi + cC + cD + cE
+	if p3&(1<<63) != 0 { // product >= 2^255: mantissa p3:p2, tail p1:p0
+		roundBit := p1&(1<<63) != 0
+		sticky := (p1&^(uint64(1)<<63) != 0) || p0 != 0
+		return roundNE(p3, p2, roundBit, sticky, a.exp+b.exp+128)
+	}
+	// product in [2^254, 2^255): shift left 1 to normalize
+	hi := p3<<1 | p2>>63
+	lo := p2<<1 | p1>>63
+	roundBit := p1&(1<<62) != 0
+	sticky := (p1&^(uint64(3)<<62) != 0) || p0 != 0
+	return roundNE(hi, lo, roundBit, sticky, a.exp+b.exp+127)
+}
+
+// divU returns a/u for an unsigned integer u (the walk's per-step denominator
+// j), rounded to nearest even.
+func (a f128) divU(u uint64) f128 {
+	if a.isZero() || u == 0 {
+		return f128{}
+	}
+	// 256-bit quotient (M/u)*2^128 = q3:q2:q1:q0 by long division. Two full
+	// fraction digits below the mantissa keep the round bit inside the
+	// computed digits even for the shallowest quotient (u > a.hi, where the
+	// quotient has only 128 significant bits), so the remainder only ever
+	// contributes to sticky, strictly below the round bit. (A 192-bit
+	// quotient with the remainder OR'd into its last digit is NOT enough:
+	// for u > ~2^62 that marker lands in the mantissa or at the round bit
+	// and breaks round-to-nearest-even about half the time.)
+	q3, r := bits.Div64(0, a.hi, u)
+	q2, r := bits.Div64(r, a.lo, u)
+	q1, r := bits.Div64(r, 0, u)
+	q0, rem := bits.Div64(r, 0, u)
+	// M >= 2^127 and u < 2^64 make the quotient >= 2^191, so at most 64
+	// leading zeros: the mantissa always comes from o3:o2 below.
+	var lz int
+	if q3 != 0 {
+		lz = bits.LeadingZeros64(q3)
+	} else {
+		lz = 64
+	}
+	o3, o2, o1, o0 := shl256(q3, q2, q1, q0, uint(lz))
+	round := o1&(uint64(1)<<63) != 0
+	sticky := o1&^(uint64(1)<<63) != 0 || o0 != 0 || rem != 0
+	return roundNE(o3, o2, round, sticky, a.exp-int64(lz))
+}
+
+// divStep is one digit step of Knuth's Algorithm D for a normalized (top bit
+// set) 128-bit divisor v1:v0: it divides the 192-bit value uHi:uMid:uLo by
+// v1:v0, where the running-remainder prefix uHi:uMid is already < v1:v0, and
+// returns the 64-bit quotient digit q and the new 128-bit remainder rHi:rLo.
+func divStep(uHi, uMid, uLo, v1, v0 uint64) (q, rHi, rLo uint64) {
+	// qhat = min((uHi:uMid)/v1, 2^64-1); Div64 requires uHi < v1, so cap when
+	// uHi == v1 (the running remainder guarantees uHi never exceeds v1).
+	var qhat, rhat uint64
+	refine := true
+	if uHi >= v1 {
+		qhat = ^uint64(0)
+		var c uint64
+		rhat, c = bits.Add64(uMid, v1, 0) // rhat = (v1:uMid) - qhat*v1 = uMid + v1
+		if c != 0 {
+			refine = false // rhat >= 2^64: the refine test is already false
+		}
+	} else {
+		qhat, rhat = bits.Div64(uHi, uMid, v1)
+	}
+	// Lower qhat (over-estimated by at most 2) until qhat*v0 <= rhat:uLo.
+	for refine {
+		hi, lo := bits.Mul64(qhat, v0)
+		if hi > rhat || (hi == rhat && lo > uLo) {
+			qhat--
+			var c uint64
+			rhat, c = bits.Add64(rhat, v1, 0)
+			if c != 0 {
+				break
+			}
+			continue
+		}
+		break
+	}
+	// u - qhat*(v1:v0), a 192-bit subtraction.
+	p1hi, p1lo := bits.Mul64(qhat, v1)
+	p0hi, p0lo := bits.Mul64(qhat, v0)
+	prodMid, c := bits.Add64(p1lo, p0hi, 0)
+	prodHi := p1hi + c
+	sLo, br := bits.Sub64(uLo, p0lo, 0)
+	sMid, br := bits.Sub64(uMid, prodMid, br)
+	_, br = bits.Sub64(uHi, prodHi, br)
+	q = qhat
+	// Defense in depth: unlike Knuth's Algorithm D, which bounds the D3
+	// adjustment at two rounds and relies on this D6 add-back, the refine loop
+	// above runs to fixpoint with an exact 128-bit test (qhat*v0 <= rhat:uLo
+	// is equivalent to U - qhat*V >= 0 given rhat's bookkeeping), so qhat
+	// should already be exact and br always 0. Kept in case that analysis is
+	// wrong; an instrumented 3M-case search never fired it.
+	if br != 0 { // qhat was 1 too large: add the divisor back
+		q--
+		sLo, c = bits.Add64(sLo, v0, 0)
+		sMid, _ = bits.Add64(sMid, v1, c)
+	}
+	return q, sMid, sLo
+}
+
+// div returns a/b rounded to nearest even, for NON-NEGATIVE operands (b != 0).
+// It divides the 256-bit a.hi:a.lo:0:0 by the normalized 128-bit b.hi:b.lo via
+// Knuth long division. Since both mantissas are in [2^127,2^128), the ratio is
+// in (0.5,2), so the 129-bit integer quotient Q is either already normalized
+// (Q < 2^128) or one bit wide (Q >= 2^128); the division remainder supplies the
+// bits below Q for round-to-nearest-even. Unlike divU (small integer divisor),
+// this handles a full f128 divisor; it is used once per setup, not in the walk.
+func (a f128) div(b f128) f128 {
+	if a.isZero() || b.isZero() {
+		return f128{}
+	}
+	v1, v0 := b.hi, b.lo
+	// Long-divide [a.hi, a.lo, 0, 0] by v1:v0, most-significant limb first.
+	var remHi, remLo uint64
+	var q1, q0 uint64 // the two low quotient digits; the top two are 0 and {0,1}
+	var q2 uint64
+	digit, remHi, remLo := divStep(remHi, remLo, a.hi, v1, v0) // = 0
+	_ = digit
+	q2, remHi, remLo = divStep(remHi, remLo, a.lo, v1, v0) // in {0,1}
+	q1, remHi, remLo = divStep(remHi, remLo, 0, v1, v0)
+	q0, remHi, remLo = divStep(remHi, remLo, 0, v1, v0)
+
+	expq := a.exp - b.exp - 128
+	if q2 != 0 { // Q in [2^128,2^129): mantissa = Q>>1, dropped low bit is round
+		mantHi := q2<<63 | q1>>1
+		mantLo := q1<<63 | q0>>1
+		round := q0&1 != 0
+		sticky := remHi != 0 || remLo != 0
+		return roundNE(mantHi, mantLo, round, sticky, expq+1)
+	}
+	// Q in [2^127,2^128): already normalized; round/sticky come from rem/b, i.e.
+	// round = (2*rem >= b), sticky = the leftover after that comparison.
+	dblLo := remLo << 1
+	dblHi := remHi<<1 | remLo>>63
+	carry := remHi >> 63
+	var round, sticky bool
+	if carry != 0 || dblHi > v1 || (dblHi == v1 && dblLo >= v0) {
+		round = true
+		sLo, br := bits.Sub64(dblLo, v0, 0)
+		sHi, _ := bits.Sub64(dblHi, v1, br)
+		sticky = sHi != 0 || sLo != 0
+	} else {
+		sticky = remHi != 0 || remLo != 0
+	}
+	return roundNE(q1, q0, round, sticky, expq)
+}
+
+// add returns a+b (both non-negative), rounded to nearest even.
+func (a f128) add(b f128) f128 {
+	if a.isZero() {
+		return b
+	}
+	if b.isZero() {
+		return a
+	}
+	if a.exp < b.exp {
+		a, b = b, a
+	}
+	// Compare in int64 before converting to a shift count: uint is 32-bit on
+	// 386/arm, where a large exponent difference would otherwise truncate.
+	if a.exp-b.exp > 128 {
+		return a // b is below the round bit
+	}
+	diff := uint(a.exp - b.exp)
+	bhi, blo, round, sticky := shr128gs(b.hi, b.lo, diff)
+	slo, c := bits.Add64(a.lo, blo, 0)
+	shi, c2 := bits.Add64(a.hi, bhi, c)
+	exp := a.exp
+	if c2 != 0 { // carry into bit 128: shift right 1, recompute round/sticky
+		sticky = sticky || round
+		round = slo&1 != 0
+		slo = slo>>1 | shi<<63
+		shi = shi>>1 | 1<<63
+		exp++
+	}
+	return roundNE(shi, slo, round, sticky, exp)
+}
+
+func (a f128) cmp(b f128) int {
+	az, bz := a.isZero(), b.isZero()
+	switch {
+	case az && bz:
+		return 0
+	case az:
+		return -1
+	case bz:
+		return 1
+	case a.exp != b.exp:
+		if a.exp < b.exp {
+			return -1
+		}
+		return 1
+	case a.hi != b.hi:
+		if a.hi < b.hi {
+			return -1
+		}
+		return 1
+	case a.lo != b.lo:
+		if a.lo < b.lo {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// intPow returns base^e by exponentiation by squaring (integer exponent).
+func (base f128) intPow(e uint64) f128 {
+	result := f128FromUint64(1)
+	b := base
+	for e > 0 {
+		if e&1 == 1 {
+			result = result.mul(b)
+		}
+		e >>= 1
+		if e > 0 {
+			b = b.mul(b)
+		}
+	}
+	return result
+}
+
+// binomialF128 evaluates the CDF of Binomial(money trials, success probability p)
+// in software f128 -- the counterpart of boost::math::binomial_distribution<double>.
+// cdf(j) returns P(X <= j). Boost computes that as ibetac(j+1, n-j, p); this
+// accumulates the IDENTICAL value as the running sum of the binomial PMF:
+//
+//	pmf(0) = (1-p)^money
+//	pmf(j) = pmf(j-1) * (money-j+1)/j * p/(1-p)
+//	cdf(j) = pmf(0) + pmf(1) + ... + pmf(j)
+//
+// cdf MUST be called with j = 0, 1, 2, ... in increasing order (as the walk
+// below does); each call advances the running PMF/CDF using only f128 software
+// arithmetic, so cdf(j) is bit-reproducible on every platform.
+type binomialF128 struct {
+	money uint64
+	pq    f128   // p/(1-p), the per-step PMF multiplier
+	pmf   f128   // pmf(at): the current term
+	cum   f128   // cdf(at) = P(X <= at)
+	at    uint64 // index that pmf/cum currently hold
+
+	frozen bool // cum can never change again: cdf(k) == cum for every k >= at
+}
+
+// newBinomialF128 constructs the CDF evaluator for Binomial(money trials,
+// p = expectedSize/totalMoney) -- the analogue of constructing
+// binomial_distribution<double>(n=money, p). Taking p as its exact integer
+// numerator and denominator lets each PMF-recurrence constant be a SINGLE
+// round-to-nearest-even f128 divide of exact values:
+//
+//	1-p     = (totalMoney-expectedSize) / totalMoney
+//	p/(1-p) = expectedSize / (totalMoney-expectedSize)
+//
+// rather than stacking roundings through an intermediate float64 p (whose
+// float64(totalMoney) conversion is itself inexact above 2^53). Note that
+// intPow then amplifies qf's single rounding by up to the trial count, so
+// pmf(0) carries ~money*2^-129 of relative error; the SelectF128 tail-edge
+// note documents the resulting CDF plateau and how the walk's freeze
+// detection handles it. Returns nil for the degenerate p >= 1 --
+// expectedSize >= totalMoney, an exact integer comparison; all probability
+// mass at j == money -- which the caller handles. totalMoney == 0 also lands
+// on the nil path.
+func newBinomialF128(expectedSize, totalMoney, money uint64) *binomialF128 {
+	if expectedSize >= totalMoney { // p >= 1
+		return nil
+	}
+	qf := f128FromUint64(totalMoney - expectedSize).div(f128FromUint64(totalMoney))   // 1-p
+	pq := f128FromUint64(expectedSize).div(f128FromUint64(totalMoney - expectedSize)) // p/(1-p)
+	pmf0 := qf.intPow(money)                                                          // (1-p)^money
+	return &binomialF128{money: money, pq: pq, pmf: pmf0, cum: pmf0, at: 0}
+}
+
+func (b *binomialF128) cdf(j uint64) f128 {
+	for b.at < j && !b.frozen {
+		b.at++
+		// pmf(at) = pmf(at-1) * (money-at+1)/at * p/(1-p)
+		pmfPrev := b.pmf
+		b.pmf = f128FromUint64(b.money - b.at + 1).divU(b.at).mul(b.pq).mul(b.pmf)
+		cumPrev := b.cum
+		b.cum = b.cum.add(b.pmf)
+		// cum is frozen once an add is a no-op while pmf strictly shrank: a
+		// shrinking pmf proves the rounded step factor is < 1, and the factor
+		// only decreases with at (round-to-nearest is monotone), so every later
+		// pmf is <= this one; and if adding THIS pmf could not move cum, no
+		// later, smaller pmf can either. From here cdf(k) == cum for all k.
+		if b.cum.cmp(cumPrev) == 0 && b.pmf.cmp(pmfPrev) < 0 {
+			b.frozen = true
+		}
+	}
+	return b.cum
+}
+
+// binomialCDFWalkF128 is the pure-Go, deterministic counterpart of the C++
+// sortition_binomial_cdf_walk in sortition.cpp. It performs the same boundary
+// walk, using an f128 ratio and f128 CDF values:
+//
+//	C++  sortition.cpp                            Go  this function
+//	------------------------------------------    -------------------------------------------
+//	uint64_t sortition_binomial_cdf_walk(         func binomialCDFWalkF128(
+//	    double n, double p, double ratio,             expectedSize, totalMoney uint64,
+//	    uint64_t money) {                             ratio f128, money uint64) uint64 {
+//	  binomial_distribution<double> dist(n, p);     dist := newBinomialF128(expectedSize, totalMoney, money)
+//	  for (uint64_t j = 0; j < money; j++) {        for j := uint64(0); j < money; j++ {
+//	    double boundary = cdf(dist, j);               boundary := dist.cdf(j)
+//	    if (ratio <= boundary) {                      if ratio.cmp(boundary) <= 0 {
+//	      return j;                                     return j
+//	    }                                           }
+//	  }                                           }
+//	  return money;                               return money
+//	}                                           }
+//
+// Boost computes cdf(dist, j) = ibetac(j+1, n-j, p) afresh each step in hardware
+// double, whereas dist.cdf(j) returns the same mathematical value as a running
+// PMF sum in software f128 (see binomialF128). The f128 path also receives the
+// digest ratio directly at f128 precision, and the success probability as its
+// exact integer numerator and denominator rather than a float64 quotient.
+//
+// Precondition: money < SelectF128MaxMoney (2^56). Below that bound no int64
+// exponent arithmetic in the walk can wrap, even at the most extreme
+// representable probability -- see the constant's doc for the accounting,
+// which must include the mantissa normalization offset (stored exp is
+// log2(v) - 127) and mul's intermediate exponent sums. Behavior beyond the
+// bound is undefined (Boost's Select cannot evaluate such money either).
+func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint64) uint64 {
+	dist := newBinomialF128(expectedSize, totalMoney, money)
+	if dist == nil { // p >= 1: cdf(j)==0 for j<money, cdf(money)==1
+		if ratio.isZero() {
+			return 0
+		}
+		return money
+	}
+	for j := uint64(0); j < money; j++ {
+		boundary := dist.cdf(j) // = cdf(dist, j) = P(X <= j)
+		if ratio.cmp(boundary) <= 0 {
+			return j
+		}
+		if dist.frozen {
+			// The boundary can never increase again, so no remaining j can be
+			// selected: return the result the full walk would reach, without
+			// stepping through the up-to-money no-op iterations (for a
+			// near-maximum ratio above the CDF's plateau that walk could
+			// otherwise take hours at supply-sized money).
+			return money
+		}
+	}
+	return money
+}

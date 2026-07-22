@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Algorand, Inc.
+// Copyright (C) 2019-2026 Algorand Foundation Ltd.
 // This file is part of go-algorand
 //
 // go-algorand is free software: you can redistribute it and/or modify
@@ -34,6 +34,10 @@ func BenchmarkSortition(b *testing.B) {
 }
 
 func TestSortitionBasic(t *testing.T) {
+	// The 2% tolerance below is only ~2 sigma for N=1000, so a randomly
+	// seeded rng flakes about 4% of the time (21/500 in one measurement);
+	// seed deterministically to keep the sanity check stable.
+	rng := rand.New(rand.NewSource(42))
 	hitcount := uint64(0)
 	const N = 1000
 	const expectedSize = 20
@@ -41,7 +45,7 @@ func TestSortitionBasic(t *testing.T) {
 	const totalMoney = 200
 	for i := 0; i < N; i++ {
 		var vrfOutput Digest
-		rand.Read(vrfOutput[:])
+		rng.Read(vrfOutput[:])
 		selected := Select(myMoney, totalMoney, expectedSize, vrfOutput)
 		hitcount += selected
 	}
@@ -56,5 +60,18 @@ func TestSortitionBasic(t *testing.T) {
 	maxd := expected / 50
 	if d > maxd {
 		t.Errorf("wanted %d selections but got %d, d=%d, maxd=%d", expected, hitcount, d, maxd)
+	}
+}
+
+// TestSelectF128MaxMoneyHeadroom is a tripwire on the exported domain bound:
+// it must keep at least two bits of headroom over the 10^16 microalgo supply
+// (the bound itself sits ~7x above it). Consumers are expected to run the
+// mirror-image check (their maximum stake against SelectF128MaxMoney) in
+// their own test suites.
+func TestSelectF128MaxMoneyHeadroom(t *testing.T) {
+	const mainnetSupply = uint64(10_000_000_000_000_000)
+	if SelectF128MaxMoney < 4*mainnetSupply {
+		t.Fatalf("SelectF128MaxMoney=%d leaves less than 2 bits of headroom over the %d supply",
+			SelectF128MaxMoney, mainnetSupply)
 	}
 }

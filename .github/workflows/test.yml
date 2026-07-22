@@ -6,17 +6,120 @@ on:
       - main
   pull_request:
 
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # Both architectures on each OS. Exact-output tests pin both paths, so
+        # a floating-point divergence in the cgo/Boost CDF between these
+        # targets shows up as a failure rather than a silent consensus split.
+        os:
+          - ubuntu-latest    # linux/amd64
+          - ubuntu-24.04-arm # linux/arm64
+          - macos-latest     # darwin/arm64
+          - macos-15-intel   # darwin/amd64
+          - windows-latest   # windows/amd64
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
 
     - name: Set up Go
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
 
     - name: Build
       run: go build -v ./...
 
     - name: Test
       run: go test -v ./...
+
+    # Ordinary `go test` runs the rapid property tests at their default 100
+    # cases; run them again at a depth that reliably samples every generator
+    # band (the divU shallow-quotient bug reproduced within ~30 banded cases,
+    # so 20000 leaves ample margin while staying under a few seconds).
+    - name: Rapid property tests
+      shell: bash
+      run: go test -v -run TestRapid ./... -args -rapid.checks=20000
+
+  # Cross-checks the "bit-identical on every platform" claim on a 32-bit-int
+  # target, where Go's int is 32 bits -- the reason f128.exp is explicitly
+  # int64. x86-64 runs i386 user code natively, so this needs no emulation;
+  # only a 32-bit C/C++ toolchain for the cgo/Boost build, which the Go
+  # toolchain invokes with -m32 automatically under GOARCH=386. armv7 (the
+  # Raspberry Pi target) has the same 32-bit int but would need slow QEMU, so
+  # 386 buys the same integer width for free.
+  test-386:
+    name: Tests (linux/386, native 32-bit)
+    runs-on: ubuntu-latest
+    env:
+      GOARCH: "386"
+      CGO_ENABLED: "1"
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+
+    - name: Install 32-bit C/C++ toolchain
+      run: sudo apt-get update && sudo apt-get install -y gcc-multilib g++-multilib
+
+    - name: Build
+      run: go build -v ./...
+
+    - name: Test
+      run: go test -v ./...
+
+    - name: Rapid property tests
+      shell: bash
+      run: go test -v -run TestRapid ./... -args -rapid.checks=20000
+
+  # Same 32-bit-int check as the 386 leg, but on the real Raspberry Pi target
+  # (armv7, GOARM=7). ARM has no i386-style native path on the amd64 runner, so
+  # it runs under QEMU in a foreign-arch container; the stock golang image
+  # carries gcc/g++ and the repo vendors Boost, so nothing extra is installed.
+  # Emulated, hence the slowest leg -- it runs the default rapid depth only,
+  # leaving the 20000-case sweep to the native legs.
+  test-armv7:
+    name: Tests (linux/arm/v7, emulated)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Test under QEMU (armv7 -- Raspberry Pi, 32-bit int)
+      run: |
+        docker run --rm --platform linux/arm/v7 \
+          -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+          golang:1.23 \
+          go test -v ./...
+
+  # Applies each curated single-site mutant of the f128 arithmetic and
+  # verifies the fast suite kills it (survivors marked equivalent carry
+  # written proofs and are expected). This keeps the kill-rate claim true
+  # over time: a weakened test lets a mutant survive, and a semantic change
+  # to the arithmetic makes an equivalent mutant die or a target string
+  # disappear -- both fail the job, deliberately coupling the mutant table to
+  # the consensus-critical lines it guards. Platform-independent, so one leg.
+  mutation:
+    name: Mutation campaign
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+
+    - name: Run mutation campaign
+      run: go run mutation_check.go
