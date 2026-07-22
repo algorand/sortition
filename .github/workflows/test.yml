@@ -77,6 +77,28 @@ jobs:
       shell: bash
       run: go test -v -run TestRapid ./... -args -rapid.checks=20000
 
+  # Same 32-bit-int check as the 386 leg, but on the real Raspberry Pi target
+  # (armv7, GOARM=7). ARM has no i386-style native path on the amd64 runner, so
+  # it runs under QEMU in a foreign-arch container; the stock golang image
+  # carries gcc/g++ and the repo vendors Boost, so nothing extra is installed.
+  # Emulated, hence the slowest leg -- it runs the default rapid depth only,
+  # leaving the 20000-case sweep to the native legs.
+  test-armv7:
+    name: Tests (linux/arm/v7, emulated)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Test under QEMU (armv7 -- Raspberry Pi, 32-bit int)
+      run: |
+        docker run --rm --platform linux/arm/v7 \
+          -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+          golang:1.23 \
+          go test -v ./...
+
   # Applies each curated single-site mutant of the f128 arithmetic and
   # verifies the fast suite kills it (survivors marked equivalent carry
   # written proofs and are expected). This keeps the kill-rate claim true
