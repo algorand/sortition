@@ -76,6 +76,47 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 // of silently misrounding consensus.
 const SelectF128MaxMoney = uint64(1) << 56
 
+// SelectF128MaxWeightFactor bounds the statistically plausible SelectF128
+// result. Outside the frozen-tail sliver documented on SelectF128, the walk
+// cannot return money-scale values: each result j needs the f128 CDF to
+// strictly increase at j, and the CDF freezes once adding the next PMF term
+// no longer moves the accumulated sum. The sum sits just below 1, in the
+// binade whose ULP spacing is 2^-128 (128-bit mantissa), so terms under
+// ~2^-129 -- half that spacing -- are no-ops. The largest reachable
+// pre-freeze index is therefore about the binomial quantile where the PMF
+// term falls to ~2^-129. For the committee sizes in current
+// go-algorand consensus use that quantile is at most ~5.2*expectedSize
+// (at expectedSize=20, today's NumProposers; the multiple shrinks toward
+// ~1.2 as committees grow -- a future committee smaller than 20 would need
+// this factor re-derived). Inside the sliver the result is DEFINED as
+// money, the account's entire stake, and no result strictly between the
+// freeze index and money is reachable at all, so any threshold in the gap
+// separates the two regimes exactly. TestSelectF128WeightGap pins the
+// freeze indexes below this factor across current committee sizes and
+// stake scales.
+//
+// Consumers that treat the result as trusted voting power or as a loop
+// bound should reject results above SelectF128MaxWeightFactor*expectedSize.
+// The factor must exceed ~5.2 to admit every reachable non-plateau result,
+// and in go-algorand it must stay below MinBalance/DownCommitteeSize =
+// 100_000/6_000 ~= 16.7 so that a plateau result -- at least the 100,000
+// microalgo minimum stake -- exceeds the bound for every committee size.
+// Every factor in that window rejects the identical, otherwise-unreachable
+// set, so 6 -- the smallest sound integer -- is chosen to keep the most
+// headroom under MinBalance as committees grow. Taking the tight end leans
+// on two commitments, each enforced by a test. First, committee sizes never
+// shrink below today's smallest of 20: reducing them would weaken the
+// chain's security assumptions independent of sortition, and go-algorand's
+// TestSortitionWeightBound asserts the floor. Second, the walk's precision
+// stays as it is: guard bits would raise the freeze quantile toward the
+// exact-arithmetic ceiling of ~7.5*expectedSize at expectedSize=20, so any
+// plateau-narrowing change must re-derive this factor, and
+// TestSelectF128WeightGap fails the moment the indexes cross the bound.
+// Rejecting a credential changes what validates and is therefore a
+// consensus rule: it must ride the same protocol upgrade gate as the switch
+// to SelectF128 itself.
+const SelectF128MaxWeightFactor = 6
+
 // SelectF128 is a deterministic sortition function. It evaluates both the VRF
 // ratio and binomial CDF at f128 precision using software integer arithmetic, so
 // its result is bit-reproducible across platforms. money must be below
@@ -143,6 +184,10 @@ const SelectF128MaxMoney = uint64(1) << 56
 // rather than the exact binomial-tail crossing. Computing pmf(0) with guard
 // bits could narrow the interval, at the cost of additional consensus-critical
 // arithmetic and audit surface.
+//
+// Because the frozen CDF makes every count strictly between the freeze index
+// and money unreachable, a consumer can reject the sliver exactly rather than
+// probabilistically: see SelectF128MaxWeightFactor.
 func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
 	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)

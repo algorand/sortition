@@ -609,3 +609,77 @@ func TestSelectF128FrozenTailReportedCase(t *testing.T) {
 		t.Fatalf("SelectF128=%d, want money=%d for ratio exactly 1.0", got, onlineStake)
 	}
 }
+
+// TestSelectF128WeightGap pins the structural gap that makes
+// SelectF128MaxWeightFactor a sound rejection threshold. A walk result j is
+// reachable only if the f128 CDF strictly increases at j, and the CDF
+// freezes permanently once adding a (strictly shrinking) PMF term no longer
+// moves the accumulated sum, so the reachable results for a distribution are
+// exactly: indexes up to the freeze index, and money itself (the defined
+// frozen-tail plateau result). Nothing in between can occur.
+//
+// The freeze index grows with the account's expected selection count
+// lambda = money*expectedSize/totalMoney <= expectedSize, so a sole account
+// holding all online stake (money == totalMoney, lambda == expectedSize) is
+// the worst case per committee size. This test steps the CDF recurrence
+// directly for every committee size in current go-algorand consensus use
+// (v41 inherits NumProposers=20, LateCommitteeSize=500, CertCommitteeSize=1500,
+// RedoCommitteeSize=2400, SoftCommitteeSize=2990, NextCommitteeSize=5000,
+// DownCommitteeSize=6000) at three stake scales -- roughly current mainnet
+// online stake, the genesis supply ceiling, and the domain bound -- and
+// asserts the freeze index stays below SelectF128MaxWeightFactor*expectedSize
+// while the plateau result money sits far above it.
+//
+// The factor is deliberately the smallest sound integer: the freeze quantile
+// is ~5.2x expectedSize at NumProposers=20 (freeze index 104 against a bound
+// of 120) and shrinks toward ~1.2x as committees grow. The thin-looking
+// margin at the smallest committee is a deterministic property of the
+// arithmetic, recomputed here on every run, not a measurement with error
+// bars. Two changes would invalidate the factor and must fail here first: a
+// committee smaller than 20 (ruled out by policy -- shrinking committees
+// weakens the chain's security assumptions -- and asserted by go-algorand's
+// TestSortitionWeightBound), and any precision change to the walk (guard
+// bits raise the freeze indexes toward the exact-arithmetic ceiling,
+// ~7.5x expectedSize at expectedSize=20, above the factor).
+func TestSelectF128WeightGap(t *testing.T) {
+	committees := []uint64{20, 500, 1500, 2400, 2990, 5000, 6000}
+	totals := []uint64{
+		2_000_000_000_000_000,  // approximately current mainnet online stake
+		10_000_000_000_000_000, // mainnet genesis supply ceiling
+		SelectF128MaxMoney - 1, // domain bound for the money argument
+	}
+
+	for _, cs := range committees {
+		for _, total := range totals {
+			money := total // sole online account: lambda == cs, the per-committee worst case
+			bound := SelectF128MaxWeightFactor * cs
+
+			if money <= bound {
+				t.Fatalf("cs=%d total=%d: money %d not above bound %d; plateau would pass the bound",
+					cs, total, money, bound)
+			}
+
+			b := newBinomialF128(cs, total, money)
+			if b == nil {
+				t.Fatalf("cs=%d total=%d: degenerate distribution", cs, total)
+			}
+			// Step far past the bound before giving up. A CDF that saturates
+			// at exactly 1.0 also freezes (the next add is a no-op with a
+			// shrinking PMF), so every distribution in domain must freeze
+			// within a small multiple of the tail quantile.
+			limit := 10 * bound
+			b.cdf(limit)
+			if !b.frozen {
+				t.Fatalf("cs=%d total=%d: CDF did not freeze within %d steps; gap analysis does not apply",
+					cs, total, limit)
+			}
+			// b.at is the step whose add was first observed to be a no-op, so
+			// the largest reachable non-plateau result is strictly below it.
+			if b.at > bound {
+				t.Fatalf("cs=%d total=%d: freeze index %d above bound %d = %d*%d; reachable weight would be rejected",
+					cs, total, b.at, bound, SelectF128MaxWeightFactor, cs)
+			}
+			t.Logf("cs=%d total=%d: freeze index %d, bound %d, plateau result %d", cs, total, b.at, bound, money)
+		}
+	}
+}
