@@ -77,10 +77,10 @@ func Select(money uint64, totalMoney uint64, expectedSize float64, vrfOutput Dig
 const SelectF128MaxMoney = uint64(1) << 56
 
 // SelectF128MaxWeightFactor bounds the statistically plausible SelectF128
-// result. Outside the frozen-tail sliver documented on SelectF128, the walk
-// cannot return money-scale values: each result j needs the f128 CDF to
-// strictly increase at j, and the CDF freezes once adding the next PMF term
-// no longer moves the accumulated sum. The sum sits just below 1, in the
+// result. The walk cannot return a result strictly between its CDF freeze
+// index and money: each result j needs the f128 CDF to strictly increase at
+// j, and the CDF freezes once adding the next PMF term no longer moves the
+// accumulated sum. The sum sits just below 1, in the
 // binade whose ULP spacing is 2^-128 (128-bit mantissa), so terms under
 // ~2^-129 -- half that spacing -- are no-ops. The largest reachable
 // pre-freeze index is therefore about the binomial quantile where the PMF
@@ -91,9 +91,14 @@ const SelectF128MaxMoney = uint64(1) << 56
 // this factor re-derived). Inside the sliver the result is DEFINED as
 // money, the account's entire stake, and no result strictly between the
 // freeze index and money is reachable at all, so any threshold in the gap
-// separates the two regimes exactly. TestSelectF128WeightGap pins the
-// freeze indexes below this factor across current committee sizes and
-// stake scales.
+// separates the two regimes exactly. Note that money itself is an ordinary
+// result for a small stake -- a 5-microalgo account can have all 5
+// microalgos selected -- and such results pass the bound, since money <=
+// factor*expectedSize makes rejection impossible for that account. Only a
+// stake above the bound can be rejected, and for such a stake the only
+// reachable result above the bound is the plateau's money.
+// TestSelectF128WeightGap pins the freeze indexes below this factor across
+// current committee sizes and stake scales.
 //
 // Consumers that treat the result as trusted voting power or as a loop
 // bound should reject results above SelectF128MaxWeightFactor*expectedSize.
