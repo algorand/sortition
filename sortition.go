@@ -120,8 +120,10 @@ const SelectF128MaxMoney = uint64(1) << 56
 // ~2^-129 of digest space does so at f128 precision; only the all-0xff digest
 // is exactly 1 under the digest/(2^256-1) mapping. If the accumulated CDF
 // rounds to 1 before freezing, the ordinary inclusive boundary wins. If it
-// freezes below 1, the promoted freeze index wins. TestSelectF128RatioExactlyOne
-// pins both trajectories.
+// freezes below 1, the promoted freeze index wins. At small money the CDF can
+// instead remain live and below 1 through every j < money, in which case the
+// ordinary loop legitimately falls through to money, the exact inverse-CDF
+// count for ratio 1. TestSelectF128RatioExactlyOne pins all three trajectories.
 //
 // The frozen sliver is approximately money*2^-129 wide. Summed over online
 // accounts, its first-order rate is approximately totalMoney*2^-129 per
@@ -131,7 +133,9 @@ const SelectF128MaxMoney = uint64(1) << 56
 // committee-scale indexes from the base account minimum through the mainnet
 // supply ceiling. Callers that violate money <= totalMoney can have a mean and
 // selection result larger than expectedSize; this tail policy is not a general
-// output cap.
+// output cap. Computing pmf(0) with guard bits would narrow the frozen sliver
+// and move the promoted indexes; changing that precision policy is therefore
+// also a consensus change.
 func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
 	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)

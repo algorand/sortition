@@ -107,7 +107,7 @@ var mutants = []mutant{
 	{name: "freeze-fire-on-change", old: "if b.cum.cmp(cumPrev) == 0 && b.pmf.cmp(pmfPrev) < 0 {", new: "if b.cum.cmp(cumPrev) != 0 && b.pmf.cmp(pmfPrev) < 0 {"},
 	{
 		name: "freeze-nonstrict-pmf", old: "b.pmf.cmp(pmfPrev) < 0 {", new: "b.pmf.cmp(pmfPrev) <= 0 {",
-		equivalent: "an equal pmf whose add was a no-op still freezes cum forever: the step factor is non-increasing, so later pmfs stay <= this one and later adds stay no-ops",
+		equivalent: "the mutant widens the trigger to equal-pmf no-ops, but no such step exists, so the observable freeze index is unchanged: pmf(k) == pmf(k-1) needs the rounded step multiplier within ~an ulp of 1, which the strictly decreasing factor satisfies only adjacent to the PMF mode, where the term is within ulps of the distribution's maximum and cum <= (k+1)*pmf, giving pmf/cum >= 1/(k+1) > 2^-57 for money < 2^56 -- far above the ~2^-129 no-op threshold, so the add always moves cum there",
 	},
 	{name: "divstep-cap-boundary", old: "if uHi >= v1 {", new: "if uHi > v1 {"},
 	{

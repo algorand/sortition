@@ -248,11 +248,13 @@ func TestSelectF128TrajectoryErrorBudget(t *testing.T) {
 	}
 }
 
-// TestSelectF128FreezePermanence ignores the production short-circuit after a
+// TestSelectF128FreezePermanence ignores the production frozen branch after a
 // bounded walk freezes and explicitly advances the recurrence to money-1.
 // Every later PMF must remain non-increasing and every rounded CDF add must be
-// a no-op, proving on the exercised grid that the promoted boundary really is
-// the first point after which the f128 CDF carries no further information.
+// a no-op, proving on the exercised grid that no later boundary can move and
+// the early exit forfeits no crossing. It does not claim to match the
+// unshortened walk's result: that walk would fall through to money, which the
+// frozen-tail policy deliberately replaces with the promoted index.
 func TestSelectF128FreezePermanence(t *testing.T) {
 	tests := []struct {
 		money, total, expected uint64

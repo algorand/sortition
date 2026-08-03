@@ -586,8 +586,12 @@ func TestSelectF128CurrentConsensusFrozenTail(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			d := maxDigestMinusPowerOfTwo(test.clearBit)
-			if got := SelectF128(test.money, test.total, test.expected, d); got != test.f128Want {
+			got := SelectF128(test.money, test.total, test.expected, d)
+			if got != test.f128Want {
 				t.Fatalf("SelectF128=%d, want promoted freeze index %d", got, test.f128Want)
+			}
+			if oracle := selectBigOracle(test.money, test.total, test.expected, d); oracle != got {
+				t.Fatalf("big.Float oracle=%d disagrees with SelectF128=%d", oracle, got)
 			}
 			if got := selectHighPrec(test.money, test.total, test.expected, d); got != test.highWant {
 				t.Fatalf("high-precision selector=%d, want finite tail count %d", got, test.highWant)
@@ -601,9 +605,12 @@ func TestSelectF128CurrentConsensusFrozenTail(t *testing.T) {
 
 // TestSelectF128CurrentCommitteeOutputCeiling checks the maximum digest, and
 // therefore the maximum SelectF128 result by digest monotonicity, across every
-// current go-algorand committee size at representative supply scales. With the
-// protocol invariant money<=totalMoney, money==totalMoney maximizes the mean
-// at expectedSize. The factor is a regression ceiling for today's arithmetic,
+// current go-algorand committee size at representative supply scales. It also
+// advances the sole-staker recurrence directly to confirm that the freeze
+// itself fires below the ceiling; an API result can instead cross earlier if
+// its CDF rounds to 1. With the protocol invariant money<=totalMoney,
+// money==totalMoney maximizes the mean at expectedSize. The factor is a
+// current-parameter regression ceiling, not a proof over every valid input and
 // not part of the API: changing precision or committee parameters requires
 // re-deriving it rather than silently turning it into a consensus cap.
 func TestSelectF128CurrentCommitteeOutputCeiling(t *testing.T) {
@@ -626,6 +633,25 @@ func TestSelectF128CurrentCommitteeOutputCeiling(t *testing.T) {
 				t.Fatalf("expected=%d total=%d: test cannot distinguish stake from ceiling %d",
 					expected, total, ceiling)
 			}
+
+			// A sole online account has the largest mean admitted by the
+			// money<=total protocol invariant. Inspect that recurrence directly:
+			// the maximum-digest API path may cross a CDF rounded to 1 before it
+			// reaches the first permanently frozen boundary.
+			b := newBinomialF128(expected, total, total)
+			if b == nil {
+				t.Fatalf("expected=%d total=%d: degenerate sole-staker distribution", expected, total)
+			}
+			limit := 10 * ceiling
+			b.cdf(limit)
+			if !b.frozen {
+				t.Fatalf("expected=%d total=%d: CDF did not freeze within %d steps", expected, total, limit)
+			}
+			if b.at > ceiling {
+				t.Fatalf("expected=%d total=%d: freeze index %d above current ceiling %d",
+					expected, total, b.at, ceiling)
+			}
+
 			stakes := map[uint64]struct{}{
 				100_000:           {},
 				total / 1_000_000: {},
@@ -649,8 +675,8 @@ func TestSelectF128CurrentCommitteeOutputCeiling(t *testing.T) {
 					observedMax = got
 				}
 			}
-			t.Logf("expected=%d total=%d: maximum observed output %d (ceiling %d)",
-				expected, total, observedMax, ceiling)
+			t.Logf("expected=%d total=%d: freeze index %d, maximum observed output %d (ceiling %d)",
+				expected, total, b.at, observedMax, ceiling)
 		}
 	}
 }
@@ -680,8 +706,12 @@ func TestSelectF128OutputCeilingRequiresStakeInvariant(t *testing.T) {
 func TestSelectF128FrozenTailReportedCase(t *testing.T) {
 	const onlineStake = uint64(2_000_000_000_000_000)
 	d := maxDigestMinusPowerOfTwo(176) // ratio ~= 1 - 2^-80
-	if got := SelectF128(onlineStake, onlineStake, 1500, d); got != 2032 {
+	got := SelectF128(onlineStake, onlineStake, 1500, d)
+	if got != 2032 {
 		t.Fatalf("SelectF128=%d, want promoted freeze index 2032", got)
+	}
+	if oracle := selectBigOracle(onlineStake, onlineStake, 1500, d); oracle != got {
+		t.Fatalf("big.Float oracle=%d disagrees with SelectF128=%d", oracle, got)
 	}
 	if got := selectHighPrec(onlineStake, onlineStake, 1500, d); got != 1913 {
 		t.Fatalf("high-precision selector=%d, want finite tail count 1913", got)

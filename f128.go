@@ -37,8 +37,9 @@ import (
 // It also shapes the ratio == 1.0 edge (all-0xff digest, or any digest with
 // >= 129 leading one bits): for some distributions the accumulated cdf rounds
 // up to exactly 1.0 at an early j and the walk stops there; in others it stays
-// below 1.0, freezes, and the walk returns the promoted freeze index (see
-// TestSelectF128RatioExactlyOne and the SelectF128 doc comment).
+// below 1.0 and either freezes, causing the walk to return the promoted freeze
+// index, or remains live through every j < money and legitimately falls through
+// to money (see TestSelectF128RatioExactlyOne and the SelectF128 doc comment).
 type f128 struct {
 	hi, lo uint64
 	// exp is explicitly 64-bit: int is 32 bits on 386/arm, and a
