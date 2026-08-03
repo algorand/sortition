@@ -37,7 +37,7 @@ import (
 // It also shapes the ratio == 1.0 edge (all-0xff digest, or any digest with
 // >= 129 leading one bits): for some distributions the accumulated cdf rounds
 // up to exactly 1.0 at an early j and the walk stops there; in others it stays
-// below 1.0 for all j < money and the walk runs to money (see
+// below 1.0, freezes, and the walk returns the promoted freeze index (see
 // TestSelectF128RatioExactlyOne and the SelectF128 doc comment).
 type f128 struct {
 	hi, lo uint64
@@ -526,6 +526,9 @@ func (b *binomialF128) cdf(j uint64) f128 {
 //	    if (ratio <= boundary) {                      if ratio.cmp(boundary) <= 0 {
 //	      return j;                                     return j
 //	    }                                           }
+//	                                                  if dist.frozen {
+//	                                                    return dist.at
+//	                                                  }
 //	  }                                           }
 //	  return money;                               return money
 //	}                                           }
@@ -535,6 +538,8 @@ func (b *binomialF128) cdf(j uint64) f128 {
 // PMF sum in software f128 (see binomialF128). The f128 path also receives the
 // digest ratio directly at f128 precision, and the success probability as its
 // exact integer numerator and denominator rather than a float64 quotient.
+// The frozen branch has no C++ counterpart: it is the documented SelectF128
+// policy for an f128 running sum that can no longer represent later CDF mass.
 //
 // Precondition: money < SelectF128MaxMoney (2^56). Below that bound no int64
 // exponent arithmetic in the walk can wrap, even at the most extreme
@@ -556,12 +561,14 @@ func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint
 			return j
 		}
 		if dist.frozen {
-			// The boundary can never increase again, so no remaining j can be
-			// selected: return the result the full walk would reach, without
-			// stepping through the up-to-money no-op iterations (for a
-			// near-maximum ratio above the CDF's plateau that walk could
-			// otherwise take hours at supply-sized money).
-			return money
+			// The boundary can never increase again. Promote the first frozen
+			// boundary to 1 and return its index, assigning the unresolved tail
+			// to one finite result instead of falling through to money after up
+			// to money no-op iterations. cdf(j) advanced dist.at to j; using
+			// this first no-op index, rather than the preceding boundary, keeps
+			// the promoted tail above every ordinary crossing and preserves
+			// monotonicity in the digest.
+			return dist.at
 		}
 	}
 	return money

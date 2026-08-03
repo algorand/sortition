@@ -44,7 +44,9 @@ const testOracleMaxCDFSteps = uint64(20_000)
 // money (up to ~2^51) where it is likewise exact. (A truly unbounded oracle would
 // need big.Rat, which is infeasible at large money -- (1-p)^money has a
 // total^money denominator -- so this range, covering all reachable inputs, is the
-// practical maximum.)
+// practical maximum.) The oracle also mirrors the production frozen-tail
+// policy: once a shrinking PMF addition no longer moves the CDF, it promotes
+// that first frozen boundary and returns its index.
 func selectBigOracle(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	const prec = f128MantBits
 	ratio := digestRatioBig(vrfOutput, prec)
@@ -66,6 +68,8 @@ func selectBigOracle(money uint64, totalMoney uint64, expectedSize uint64, vrfOu
 		return 0
 	}
 	for j := uint64(1); j < money && j <= testOracleMaxCDFSteps; j++ {
+		pmfPrev := pmf
+		cdfPrev := cdf
 		factor := new(big.Float).SetPrec(prec).Quo(
 			new(big.Float).SetPrec(prec).SetUint64(money-j+1),
 			new(big.Float).SetPrec(prec).SetUint64(j))
@@ -73,6 +77,9 @@ func selectBigOracle(money uint64, totalMoney uint64, expectedSize uint64, vrfOu
 		pmf = new(big.Float).SetPrec(prec).Mul(pmf, step)
 		cdf = new(big.Float).SetPrec(prec).Add(cdf, pmf)
 		if cdf.Cmp(ratio) >= 0 {
+			return j
+		}
+		if cdf.Cmp(cdfPrev) == 0 && pmf.Cmp(pmfPrev) < 0 {
 			return j
 		}
 	}
@@ -118,10 +125,9 @@ func FuzzSelectF128(f *testing.F) {
 	f.Add(uint64(100), uint64(1000), uint64(2000), make([]byte, 32)) // expectedSize > totalMoney
 	// all-0xff digest: ratio is exactly 1.0, the cdf-reaches-1.0 regime
 	f.Add(uint64(1954), uint64(1_999_999_999_999_964), uint64(1500), bytes.Repeat([]byte{0xff}, 32))
-	// fall-through to money by full walk (p=1/2: the pmf never drops below
-	// cum's half-ulp, so the CDF never freezes) and by the freeze short-circuit
-	// (tiny p: pmf underflows within a few steps); the second must equal the
-	// oracle's unshortened walk
+	// A legitimate fall-through to money (p=1/2: the pmf never drops below
+	// cum's half-ulp, so the CDF never freezes) and the promoted-freeze path
+	// (tiny p: the CDF stops moving within a few steps).
 	f.Add(uint64(100), uint64(200), uint64(100), bytes.Repeat([]byte{0xff}, 32))
 	f.Add(uint64(1954), uint64(1_999_999_999_999_960), uint64(1500), bytes.Repeat([]byte{0xff}, 32))
 	// expectedSize > totalMoney with a nonzero digest: the degenerate path's money return
@@ -320,15 +326,15 @@ func TestSelectF128NearMaximumDigest(t *testing.T) {
 // TestSelectF128RatioExactlyOne pins the walk when the f128 ratio is exactly
 // 1.0: mathematically for the all-0xff digest, and by 128-bit rounding for any
 // digest with at least 129 leading one bits. With the f128-rounded threshold
-// fixed at 1.0, money is the exact-CDF count; the walk returns an earlier j
-// only when the accumulated f128 CDF happens to round up to exactly 1.0 (see
-// the SelectF128 doc comment). Each case pins one branch:
+// fixed at 1.0, money is the exact-CDF count. SelectF128 deliberately returns
+// an earlier finite index when the accumulated f128 CDF either rounds up to
+// exactly 1.0 or freezes below it (see the SelectF128 doc comment). Each case
+// pins one branch:
 //
 //   - money=1954 with total=1_999_999_999_999_964: stops early at j=3, while
-//     the same distribution with total=2_000_000_000_000_000 (36 more) falls
-//     through to money. A hair-trigger pair pinned together: if a rounding
-//     change flips either, the cdf trajectory moved by an ulp -- the walk did
-//     not break.
+//     the same distribution with total=2_000_000_000_000_000 (36 more)
+//     freezes at j=5. A hair-trigger pair pinned together: if a rounding
+//     change flips either, the CDF trajectory moved by an ulp.
 //   - money=100, p=1/2: provably falls through to money -- cdf(99) is
 //     1 - 2^-100, which sits 2^28 ulps below 1.0, a gap no rounding can
 //     bridge.
@@ -354,7 +360,7 @@ func TestSelectF128RatioExactlyOne(t *testing.T) {
 		want                   uint64
 	}{
 		{1954, 1_999_999_999_999_964, 1500, 3},
-		{1954, 2_000_000_000_000_000, 1500, 1954},
+		{1954, 2_000_000_000_000_000, 1500, 5},
 		{100, 200, 100, 100},
 		{129, 258, 129, 128},
 	}
@@ -538,7 +544,7 @@ func TestDivUVsBig(t *testing.T) {
 	}
 }
 
-// TestSelectF128CurrentConsensusFrozenTail pins the accepted frozen-tail
+// TestSelectF128CurrentConsensusFrozenTail pins the promoted frozen-tail
 // behavior at values admitted by current go-algorand consensus parameters.
 // Consensus v41 inherits NumProposers=20, NextCommitteeSize=5000, and
 // MinBalance=100,000 microalgos. Its payout-eligibility interval is 30,000
@@ -549,11 +555,14 @@ func TestDivUVsBig(t *testing.T) {
 //
 // In every case q=(1-p) rounds downward. Raising q to money scales every PMF
 // term down enough that the accumulated f128 CDF freezes below the chosen
-// digest ratio. SelectF128 defines this interval to return money; completion
-// is also the liveness assertion, since the unshortened walk would perform up
-// to money no-op iterations. The deployed Boost walk does not share the
-// plateau: the digest rounds to binary64 1.0, and its independently evaluated
-// CDF reaches 1.0 at the finite values pinned in boostWant.
+// digest ratio. SelectF128 promotes the first frozen boundary to 1 and returns
+// its index, so every result remains committee-scale instead of falling
+// through to money after up to money no-op iterations. The deployed Boost walk
+// does not share the plateau: the digest rounds to binary64 1.0, and its
+// independently evaluated CDF reaches 1.0 at the finite values in boostWant.
+// highWant records the 512-bit recurrence's finite tail quantile to make the
+// deliberate approximation visible: the promoted index is not exact, but it
+// remains in the same committee-scale neighborhood instead of returning stake.
 func TestSelectF128CurrentConsensusFrozenTail(t *testing.T) {
 	const (
 		mainnetSupply = uint64(10_000_000_000_000_000)
@@ -564,19 +573,24 @@ func TestSelectF128CurrentConsensusFrozenTail(t *testing.T) {
 		total     uint64
 		expected  uint64
 		clearBit  uint
+		f128Want  uint64
+		highWant  uint64
 		boostWant uint64
 	}{
-		{"proposer committee", 1_999_999_999_999_999, 1_999_999_999_999_999, 20, 175, 67},
-		{"base minimum balance", 100_000, mainnetSupply, 5_000, 141, 2},
-		{"payout minimum balance", 30_000_000_000, mainnetSupply, 5_000, 159, 6},
-		{"payout maximum balance", 70_000_000_000_000, mainnetSupply, 5_000, 170, 94},
-		{"mainnet supply ceiling", mainnetSupply, mainnetSupply, 5_000, 178, 5_598},
+		{"proposer committee", 1_999_999_999_999_999, 1_999_999_999_999_999, 20, 175, 104, 81, 67},
+		{"base minimum balance", 100_000, mainnetSupply, 5_000, 141, 6, 4, 2},
+		{"payout minimum balance", 30_000_000_000, mainnetSupply, 5_000, 159, 15, 11, 6},
+		{"payout maximum balance", 70_000_000_000_000, mainnetSupply, 5_000, 170, 138, 114, 94},
+		{"mainnet supply ceiling", mainnetSupply, mainnetSupply, 5_000, 178, 5_945, 5_730, 5_598},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			d := maxDigestMinusPowerOfTwo(test.clearBit)
-			if got := SelectF128(test.money, test.total, test.expected, d); got != test.money {
-				t.Fatalf("SelectF128=%d, want money=%d for a ratio above the CDF plateau", got, test.money)
+			if got := SelectF128(test.money, test.total, test.expected, d); got != test.f128Want {
+				t.Fatalf("SelectF128=%d, want promoted freeze index %d", got, test.f128Want)
+			}
+			if got := selectHighPrec(test.money, test.total, test.expected, d); got != test.highWant {
+				t.Fatalf("high-precision selector=%d, want finite tail count %d", got, test.highWant)
 			}
 			if got := Select(test.money, test.total, float64(test.expected), d); got != test.boostWant {
 				t.Fatalf("Boost Select=%d, want finite tail count %d", got, test.boostWant)
@@ -585,16 +599,92 @@ func TestSelectF128CurrentConsensusFrozenTail(t *testing.T) {
 	}
 }
 
+// TestSelectF128CurrentCommitteeOutputCeiling checks the maximum digest, and
+// therefore the maximum SelectF128 result by digest monotonicity, across every
+// current go-algorand committee size at representative supply scales. With the
+// protocol invariant money<=totalMoney, money==totalMoney maximizes the mean
+// at expectedSize. The factor is a regression ceiling for today's arithmetic,
+// not part of the API: changing precision or committee parameters requires
+// re-deriving it rather than silently turning it into a consensus cap.
+func TestSelectF128CurrentCommitteeOutputCeiling(t *testing.T) {
+	committees := []uint64{20, 500, 1500, 2400, 2990, 5000, 6000}
+	totals := []uint64{
+		2_000_000_000_000_000,
+		10_000_000_000_000_000,
+		SelectF128MaxMoney - 1,
+	}
+	const maxCurrentFreezeMultiple = uint64(6)
+
+	var maximum Digest
+	for i := range maximum {
+		maximum[i] = 0xff
+	}
+	for _, expected := range committees {
+		for _, total := range totals {
+			ceiling := maxCurrentFreezeMultiple * expected
+			if total <= ceiling {
+				t.Fatalf("expected=%d total=%d: test cannot distinguish stake from ceiling %d",
+					expected, total, ceiling)
+			}
+			stakes := map[uint64]struct{}{
+				100_000:           {},
+				total / 1_000_000: {},
+				total / 1_000:     {},
+				total / 10:        {},
+				total / 2:         {},
+				total - 1:         {},
+				total:             {},
+			}
+			var observedMax uint64
+			for money := range stakes {
+				if money == 0 || money > total {
+					continue
+				}
+				got := SelectF128(money, total, expected, maximum)
+				if got > ceiling {
+					t.Fatalf("expected=%d money=%d total=%d: maximum digest selected %d, above current ceiling %d",
+						expected, money, total, got, ceiling)
+				}
+				if got > observedMax {
+					observedMax = got
+				}
+			}
+			t.Logf("expected=%d total=%d: maximum observed output %d (ceiling %d)",
+				expected, total, observedMax, ceiling)
+		}
+	}
+}
+
+// TestSelectF128OutputCeilingRequiresStakeInvariant prevents the
+// current-committee regression ceiling above from being mistaken for a
+// library-wide result cap. If money exceeds totalMoney, the mean
+// money*expectedSize/totalMoney can exceed the committee size by an arbitrary
+// factor; promotion only handles the unresolved frozen tail and must not clip
+// an ordinary crossing.
+func TestSelectF128OutputCeilingRequiresStakeInvariant(t *testing.T) {
+	var maximum Digest
+	for i := range maximum {
+		maximum[i] = 0xff
+	}
+	if got := SelectF128(1_000_000, 100, 20, maximum); got != 204_858 {
+		t.Fatalf("SelectF128=%d, want ordinary high-mean crossing 204858", got)
+	}
+}
+
 // TestSelectF128FrozenTailReportedCase retains the original supply-sized
 // reproducer: pmf(0)'s trial-count-amplified rounding leaves the accumulated
 // CDF around 2^-78 below 1 when money == totalMoney == 2e15 and committee size
 // is the current certification size 1500. The ratio 1-2^-80 is above that
-// plateau, while Boost terminates at its binary64 tail boundary.
+// plateau, so SelectF128 returns the promoted index 2032; the 512-bit
+// recurrence and Boost terminate at finite tail counts 1913 and 1832.
 func TestSelectF128FrozenTailReportedCase(t *testing.T) {
 	const onlineStake = uint64(2_000_000_000_000_000)
 	d := maxDigestMinusPowerOfTwo(176) // ratio ~= 1 - 2^-80
-	if got := SelectF128(onlineStake, onlineStake, 1500, d); got != onlineStake {
-		t.Fatalf("SelectF128=%d, want money=%d for a ratio above the CDF plateau", got, onlineStake)
+	if got := SelectF128(onlineStake, onlineStake, 1500, d); got != 2032 {
+		t.Fatalf("SelectF128=%d, want promoted freeze index 2032", got)
+	}
+	if got := selectHighPrec(onlineStake, onlineStake, 1500, d); got != 1913 {
+		t.Fatalf("high-precision selector=%d, want finite tail count 1913", got)
 	}
 	if got := Select(onlineStake, onlineStake, 1500, d); got != 1832 {
 		t.Fatalf("Boost Select=%d, want finite tail count 1832", got)
@@ -605,7 +695,7 @@ func TestSelectF128FrozenTailReportedCase(t *testing.T) {
 	for i := range d {
 		d[i] = 0xff
 	}
-	if got := SelectF128(onlineStake, onlineStake, 1500, d); got != onlineStake {
-		t.Fatalf("SelectF128=%d, want money=%d for ratio exactly 1.0", got, onlineStake)
+	if got := SelectF128(onlineStake, onlineStake, 1500, d); got != 2032 {
+		t.Fatalf("SelectF128=%d, want promoted freeze index 2032 for ratio exactly 1.0", got)
 	}
 }

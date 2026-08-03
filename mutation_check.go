@@ -94,6 +94,16 @@ var mutants = []mutant{
 		new:  "for j := uint64(1); j < money; j++ {\n\t\tboundary := dist.cdf(j)",
 	},
 	{name: "walk-strict-compare", old: "P(X <= j)\n\t\tif ratio.cmp(boundary) <= 0 {", new: "P(X <= j)\n\t\tif ratio.cmp(boundary) < 0 {"},
+	{
+		name: "frozen-branch-return-money",
+		old:  "\t\t\treturn dist.at",
+		new:  "\t\t\treturn money",
+	},
+	{
+		name: "frozen-branch-off-by-one",
+		old:  "\t\t\treturn dist.at",
+		new:  "\t\t\treturn dist.at + 1",
+	},
 	{name: "freeze-fire-on-change", old: "if b.cum.cmp(cumPrev) == 0 && b.pmf.cmp(pmfPrev) < 0 {", new: "if b.cum.cmp(cumPrev) != 0 && b.pmf.cmp(pmfPrev) < 0 {"},
 	{
 		name: "freeze-nonstrict-pmf", old: "b.pmf.cmp(pmfPrev) < 0 {", new: "b.pmf.cmp(pmfPrev) <= 0 {",
@@ -130,6 +140,12 @@ var mutants = []mutant{
 		target: "f128_test.go",
 		old:    "new(big.Float).SetPrec(prec).SetUint64(money-j+1),",
 		new:    "new(big.Float).SetPrec(prec).SetUint64(money-j),",
+	},
+	{
+		name:   "big-oracle-ignore-freeze",
+		target: "f128_test.go",
+		old:    "if cdf.Cmp(cdfPrev) == 0 && pmf.Cmp(pmfPrev) < 0 {\n\t\t\treturn j\n\t\t}",
+		new:    "if cdf.Cmp(cdfPrev) == 0 && pmf.Cmp(pmfPrev) < 0 {\n\t\t\treturn money\n\t\t}",
 	},
 	{
 		name:   "digest-oracle-denominator",

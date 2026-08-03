@@ -272,9 +272,10 @@ func TestRapidF128Metamorphic(t *testing.T) {
 // the digest. This holds exactly -- the digest-to-ratio conversion is monotone
 // (round-to-nearest of a monotone quotient, and the halfway correction only
 // ever rounds up), and a larger ratio can only cross the same CDF boundaries
-// later or freeze to money. The differential tests share one structural blind
-// spot: a defect mirrored into the big.Float oracle (as the pmf(0) plateau
-// was) is invisible to them; a property test against mathematics is not.
+// later or reach the promoted freeze index. The differential tests share one
+// structural blind spot: a defect mirrored into the big.Float oracle (as the
+// pmf(0) plateau was) is invisible to them; a property test against
+// mathematics is not.
 func TestRapidSelectF128DigestMonotonic(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		money := rapid.Uint64Range(0, 3000).Draw(t, "money")

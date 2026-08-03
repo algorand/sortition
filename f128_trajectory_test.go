@@ -251,8 +251,8 @@ func TestSelectF128TrajectoryErrorBudget(t *testing.T) {
 // TestSelectF128FreezePermanence ignores the production short-circuit after a
 // bounded walk freezes and explicitly advances the recurrence to money-1.
 // Every later PMF must remain non-increasing and every rounded CDF add must be
-// a no-op, proving on the exercised grid that the optimization returns the
-// same answer as the otherwise impractical unshortened walk.
+// a no-op, proving on the exercised grid that the promoted boundary really is
+// the first point after which the f128 CDF carries no further information.
 func TestSelectF128FreezePermanence(t *testing.T) {
 	tests := []struct {
 		money, total, expected uint64
@@ -307,7 +307,7 @@ func selectF128WithStepCount(money, total, expected uint64, d Digest) (selected,
 			return j, evaluations, false
 		}
 		if dist.frozen {
-			return money, evaluations, true
+			return dist.at, evaluations, true
 		}
 	}
 	return money, evaluations, false
@@ -315,7 +315,7 @@ func selectF128WithStepCount(money, total, expected uint64, d Digest) (selected,
 
 // TestSelectF128ConsensusStepBounds makes liveness deterministic by counting
 // CDF evaluations rather than timing them. The cases cover certified tails
-// outside the frozen sliver and defined money-returning cases inside it.
+// outside the frozen sliver and promoted finite boundaries inside it.
 func TestSelectF128ConsensusStepBounds(t *testing.T) {
 	const (
 		online = uint64(2_000_000_000_000_000)
@@ -331,9 +331,9 @@ func TestSelectF128ConsensusStepBounds(t *testing.T) {
 		{"online 1500 certified tail", online, online, 1500, maxDigestMinusPowerOfTwo(196), 1852, false},
 		{"online 6000 certified tail", online, online, 6000, maxDigestMinusPowerOfTwo(200), 6667, false},
 		{"supply 5000 certified tail", supply, supply, 5000, maxDigestMinusPowerOfTwo(190), 5667, false},
-		{"proposer frozen tail", online - 1, online - 1, 20, maxDigestMinusPowerOfTwo(175), online - 1, true},
-		{"base minimum frozen tail", 100_000, supply, 5000, maxDigestMinusPowerOfTwo(141), 100_000, true},
-		{"supply frozen tail", supply, supply, 5000, maxDigestMinusPowerOfTwo(178), supply, true},
+		{"proposer frozen tail", online - 1, online - 1, 20, maxDigestMinusPowerOfTwo(175), 104, true},
+		{"base minimum frozen tail", 100_000, supply, 5000, maxDigestMinusPowerOfTwo(141), 6, true},
+		{"supply frozen tail", supply, supply, 5000, maxDigestMinusPowerOfTwo(178), 5945, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
