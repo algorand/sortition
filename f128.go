@@ -550,10 +550,18 @@ func (b *binomialF128) cdf(j uint64) f128 {
 // bound is undefined (Boost's Select cannot evaluate such money either).
 func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint64) uint64 {
 	dist := newBinomialF128(expectedSize, totalMoney, money)
-	if dist == nil { // p >= 1: cdf(j)==0 for j<money, cdf(money)==1
+	if dist == nil {
+		// newBinomialF128 returns nil iff expectedSize >= totalMoney.
+		// For nonzero totalMoney this is p >= 1: cdf(j)==0 for j<money,
+		// cdf(money)==1. The otherwise undefined totalMoney==0 case
+		// deliberately shares these deterministic degenerate semantics.
 		if ratio.isZero() {
+			// The inclusive inverse-CDF convention makes ratio 0 select the
+			// first index, 0.
 			return 0
 		}
+		// A positive ratio cannot cross any cdf(j)==0 boundary for j<money;
+		// it crosses cdf(money)==1, so the selected count is money.
 		return money
 	}
 	for j := uint64(0); j < money; j++ {
@@ -572,5 +580,11 @@ func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint
 			return dist.at
 		}
 	}
+	// Every represented boundary for j < money stayed below ratio without
+	// freezing, so the selected count is the ordinary inverse-CDF endpoint
+	// X=money. This is legitimately reachable for small distributions (for
+	// example ratio 1 at money=100, p=1/2; see
+	// TestSelectF128RatioExactlyOne) and is the same final endpoint used by the
+	// Boost reference walk.
 	return money
 }
