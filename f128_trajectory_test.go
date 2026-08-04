@@ -309,7 +309,7 @@ func selectF128WithStepCount(money, total, expected uint64, d Digest) (selected,
 			return j, evaluations, false
 		}
 		if dist.frozen {
-			return dist.at, evaluations, true
+			return j, evaluations, true
 		}
 	}
 	return money, evaluations, false

@@ -526,13 +526,13 @@ func (b *binomialF128) cdf(j uint64) f128 {
 //	    double boundary = cdf(dist, j);               boundary := dist.cdf(j)
 //	    if (ratio <= boundary) {                      if ratio.cmp(boundary) <= 0 {
 //	      return j;                                     return j
-//	    }                                           }
+//	    }                                             }
 //	                                                  if dist.frozen {
-//	                                                    return dist.at
+//	                                                    return j
 //	                                                  }
-//	  }                                           }
-//	  return money;                               return money
-//	}                                           }
+//	  }                                             }
+//	  return money;                                 return money
+//	}                                             }
 //
 // Boost computes cdf(dist, j) = ibetac(j+1, n-j, p) afresh each step in hardware
 // double, whereas dist.cdf(j) returns the same mathematical value as a running
@@ -573,11 +573,10 @@ func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint
 			// The boundary can never increase again. Promote the first frozen
 			// boundary to 1 and return its index, assigning the unresolved tail
 			// to one finite result instead of falling through to money after up
-			// to money no-op iterations. cdf(j) advanced dist.at to j; using
-			// this first no-op index, rather than the preceding boundary, keeps
-			// the promoted tail above every ordinary crossing and preserves
-			// monotonicity in the digest.
-			return dist.at
+			// to money no-op iterations. Using this first no-op index, rather
+			// than the preceding boundary, keeps the promoted tail above every
+			// ordinary crossing and preserves monotonicity in the digest.
+			return j
 		}
 	}
 	// Every represented boundary for j < money stayed below ratio without

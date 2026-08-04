@@ -96,13 +96,13 @@ var mutants = []mutant{
 	{name: "walk-strict-compare", old: "P(X <= j)\n\t\tif ratio.cmp(boundary) <= 0 {", new: "P(X <= j)\n\t\tif ratio.cmp(boundary) < 0 {"},
 	{
 		name: "frozen-branch-return-money",
-		old:  "\t\t\treturn dist.at",
-		new:  "\t\t\treturn money",
+		old:  "monotonicity in the digest.\n\t\t\treturn j",
+		new:  "monotonicity in the digest.\n\t\t\treturn money",
 	},
 	{
 		name: "frozen-branch-off-by-one",
-		old:  "\t\t\treturn dist.at",
-		new:  "\t\t\treturn dist.at + 1",
+		old:  "monotonicity in the digest.\n\t\t\treturn j",
+		new:  "monotonicity in the digest.\n\t\t\treturn j + 1",
 	},
 	{name: "freeze-fire-on-change", old: "if b.cum.cmp(cumPrev) == 0 && b.pmf.cmp(pmfPrev) < 0 {", new: "if b.cum.cmp(cumPrev) != 0 && b.pmf.cmp(pmfPrev) < 0 {"},
 	{
