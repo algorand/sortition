@@ -35,6 +35,7 @@ go test -run xxx -fuzz FuzzSelectF128 -fuzztime 10m
 | Exhaustive boundary grids | Enumerates small parameter domains and checks digest integers below, at, and above every exact CDF boundary, with anti-vacuity counters | `cdf_exhaustive_test.go`, `oracle_hardening_test.go` |
 | Higher-precision convergence | Requires the 512- and 1024-bit CDF walks to converge and compares them with exact small-domain results and certified large-money results | `selectAtPrecision` in `f128_exact_test.go`, tests in `oracle_hardening_test.go` |
 | Internal trajectory and liveness | Checks PMF/CDF error envelopes and monotonicity, audits the maximum-domain exponent path, proves bounded freeze permanence, and pins CDF-evaluation limits | `f128_trajectory_test.go` |
+| Frozen-tail output pinning | Compares promoted indexes with high-precision and Boost tail counts, and bounds maximum-digest outputs across current committee sizes, stake fractions, and supply scales | `TestSelectF128CurrentConsensusFrozenTail` and `TestSelectF128CurrentCommitteeOutputCeiling` in `f128_test.go` |
 | Metamorphic properties | Checks digest monotonicity, power-of-two and arbitrary common-factor probability scaling, primitive identities, and arithmetic order properties without a numeric oracle | `f128_rapid_test.go` |
 | Distribution sanity | Checks aggregate selection weight against the expected binomial mean without reusing the CDF formula | `TestSelectF128Distribution` in `f128_exact_test.go` |
 | Arb-certified quantiles | Uses Arb's regularized incomplete beta implementation to certify large-money quantile inequalities with rigorous dyadic endpoints | `tools/generate_arb_oracle.py`, `testdata/f128_arb_certificates.json`, `f128_arb_certificate_test.go` |
@@ -66,9 +67,11 @@ those endpoints enclose the true incomplete-beta CDF.
 
 ## Important test semantics
 
-- The near-one frozen-tail sliver is defined to return `money`. Exact-math
-  tolerance tests exclude that interval deliberately; dedicated tests pin its
-  behavior and liveness at current-scale values.
+- The near-one frozen-tail sliver promotes the first permanently frozen CDF
+  boundary to 1 and returns its finite index. Exact-math tolerance tests
+  exclude that interval deliberately because this is a precision policy, not
+  the exact binomial quantile; dedicated tests pin its behavior and liveness
+  at current-scale values.
 - `money` must remain below `SelectF128MaxMoney`. The maximum-domain exponent
   audit checks the worst representable `1-p` combination without performing a
   supply-sized walk.

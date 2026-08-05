@@ -100,49 +100,42 @@ const SelectF128MaxMoney = uint64(1) << 56
 // one, so replacing Select with SelectF128 remains a protocol-gated,
 // network-coordinated consensus change.
 //
-// One tail edge: the top ~2^-129 of digest space rounds to an f128 ratio of
-// exactly 1.0 (only the all-0xff digest IS exactly 1.0; the rest of the
-// interval rounds up to it). With the threshold fixed at 1.0, the exact CDF is
-// < 1 for every j < money and the walk never evaluates cdf(money) == 1, so the
-// exact-CDF count is money -- and the walk returns money unless the accumulated
-// f128 CDF happens to round up to exactly 1.0 at an earlier j (a rounding
-// artifact), in which case it returns that j. Both outcomes occur, decided
-// per-distribution at ulp granularity: the money=1954 case in
-// TestSelectF128RatioExactlyOne stops at j=3, while the same distribution with
-// total=2_000_000_000_000_000 falls through to money. Both match the 128-bit
-// big.Float oracle. Boost's double CDF -- evaluated independently per j via
-// ibetac rather than accumulated -- can also saturate to 1.0 on its far coarser
-// grid, potentially at a different (typically earlier) j. At these near-maximum
-// digests the two implementations can therefore return wildly different counts:
-// one may stop within a few steps of the binomial tail while the other returns
-// the full trial count money. A uniform VRF output lands in this interval with
-// probability about 2^-129 per credential. The event is possible, but the
-// consensus threat model treats it as negligible and assumes the registered
-// key and unpredictable seed prevent an adversary from targeting it. This is
-// therefore a documented statistical edge rather than a case special-cased by
-// the implementation.
+// FROZEN-TAIL POLICY. Rounding q=1-p once and then raising it to money can
+// scale every PMF term by a common error of about money*2^-129. When that
+// error is downward, the accumulated f128 CDF can settle at a plateau below
+// 1. A digest ratio above the plateau would never cross another represented
+// boundary, and a literal walk would eventually fall through and return
+// money after as many as money no-op iterations.
 //
-// The same holds in a wider sliver just below 1.0. pmf(0) = (1-p)^money
-// amplifies the 2^-129 rounding of 1-p by up to the trial count, and pmf(0)
-// scales every PMF term, so the accumulated CDF settles at a plateau that can
-// sit as much as ~money*2^-129 below 1 (~2^-78 at 2e15 microalgos of stake,
-// and ~2^-76 at the 10^16-microalgo mainnet supply ceiling). A digest ratio
-// between that plateau and 1.0 sits above every boundary without rounding to
-// 1.0; the walk detects the frozen CDF and immediately returns money, the same
-// result the plain walk would reach after up to money no-op iterations.
+// Once an addition leaves the CDF unchanged while the PMF is strictly
+// shrinking, every later term is no larger and every later CDF addition is
+// also a no-op. SelectF128 therefore promotes that first frozen boundary to 1
+// and returns its index. This assigns the unresolved tail to one finite result
+// instead of treating the account's entire stake as its selection weight. It
+// is a deliberate approximation: affected digests no longer distinguish the
+// true binomial quantiles beyond the precision horizon, and the result differs
+// from the literal fall-through in the C++ reference loop.
 //
-// These outputs are possible under current go-algorand committee and balance
-// bounds; TestSelectF128CurrentConsensusFrozenTail pins examples from the base
-// account minimum through the mainnet supply ceiling. For an account with
-// stake m, the affected interval is approximately m*2^-129, and summing that
-// first-order bound over all online accounts gives approximately
-// totalMoney*2^-129 per committee selection, independent of how stake is
-// split. The consensus rationale for accepting the edge is probabilistic, not
-// impossibility: registered keys and an unpredictable seed are assumed to
-// prevent targeting the interval. Within it the count is DEFINED as money
-// rather than the exact binomial-tail crossing. Computing pmf(0) with guard
-// bits could narrow the interval, at the cost of additional consensus-critical
-// arithmetic and audit surface.
+// The rule also applies when the digest ratio rounded to exactly 1. The top
+// ~2^-129 of digest space does so at f128 precision; only the all-0xff digest
+// is exactly 1 under the digest/(2^256-1) mapping. If the accumulated CDF
+// rounds to 1 before freezing, the ordinary inclusive boundary wins. If it
+// freezes below 1, the promoted freeze index wins. At small money the CDF can
+// instead remain live and below 1 through every j < money, in which case the
+// ordinary loop legitimately falls through to money, the exact inverse-CDF
+// count for ratio 1. TestSelectF128RatioExactlyOne pins all three trajectories.
+//
+// The frozen sliver is approximately money*2^-129 wide. Summed over online
+// accounts, its first-order rate is approximately totalMoney*2^-129 per
+// committee selection, independent of how stake is split. Under the protocol
+// invariant money <= totalMoney, the binomial mean is at most expectedSize;
+// current-parameter regression tests pin the promoted results at
+// committee-scale indexes from the base account minimum through the mainnet
+// supply ceiling. Callers that violate money <= totalMoney can have a mean and
+// selection result larger than expectedSize; this tail policy is not a general
+// output cap. Computing pmf(0) with guard bits would narrow the frozen sliver
+// and move the promoted indexes; changing that precision policy is therefore
+// also a consensus change.
 func SelectF128(money uint64, totalMoney uint64, expectedSize uint64, vrfOutput Digest) uint64 {
 	ratio := f128FromDigestRatio(vrfOutput)
 	return binomialCDFWalkF128(expectedSize, totalMoney, ratio, money)

@@ -272,9 +272,13 @@ func TestRapidF128Metamorphic(t *testing.T) {
 // the digest. This holds exactly -- the digest-to-ratio conversion is monotone
 // (round-to-nearest of a monotone quotient, and the halfway correction only
 // ever rounds up), and a larger ratio can only cross the same CDF boundaries
-// later or freeze to money. The differential tests share one structural blind
-// spot: a defect mirrored into the big.Float oracle (as the pmf(0) plateau
-// was) is invisible to them; a property test against mathematics is not.
+// later, reach the promoted freeze index, or fall through to money. Uniformly
+// generated digests cannot actually reach the frozen tail at these magnitudes
+// (with money <= 3000 the sliver is at most ~2^-117 of digest space), so
+// TestSelectF128FrozenTransitionMonotonic below brackets it deterministically.
+// The differential tests share one structural blind spot: a defect mirrored
+// into the big.Float oracle (as the pmf(0) plateau was) is invisible to them;
+// a property test against mathematics is not.
 func TestRapidSelectF128DigestMonotonic(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		money := rapid.Uint64Range(0, 3000).Draw(t, "money")
@@ -293,4 +297,42 @@ func TestRapidSelectF128DigestMonotonic(t *testing.T) {
 				low, high, money, total, expected, d1, d2)
 		}
 	})
+}
+
+// TestSelectF128FrozenTransitionMonotonic pins monotonicity across the frozen
+// transition, which the uniform generator above has effectively zero chance
+// of entering. Each pair brackets a pinned consensus distribution's plateau
+// boundary: the smaller digest must resolve as an ordinary crossing, the
+// larger must take the frozen branch, and ordering must hold between them.
+// The instrumented walk makes the branch assertion non-vacuous rather than
+// trusting the digest construction.
+func TestSelectF128FrozenTransitionMonotonic(t *testing.T) {
+	cases := []struct {
+		name                   string
+		money, total, expected uint64
+		belowBit, inBit        uint
+	}{
+		// gaps 2^-66 (below the ~2^-76 plateau) and 2^-78 (inside it)
+		{"supply ceiling 5000", 10_000_000_000_000_000, 10_000_000_000_000_000, 5000, 190, 178},
+		// gaps 2^-60 (below the ~2^-78 plateau) and 2^-80 (inside it)
+		{"online 1500", 2_000_000_000_000_000, 2_000_000_000_000_000, 1500, 196, 176},
+	}
+	for _, c := range cases {
+		dBelow := maxDigestMinusPowerOfTwo(c.belowBit)
+		dIn := maxDigestMinusPowerOfTwo(c.inBit)
+		below, _, frozeBelow := selectF128WithStepCount(c.money, c.total, c.expected, dBelow)
+		in, _, frozeIn := selectF128WithStepCount(c.money, c.total, c.expected, dIn)
+		if frozeBelow || !frozeIn {
+			t.Fatalf("%s: pair does not bracket the plateau: frozeBelow=%v frozeIn=%v", c.name, frozeBelow, frozeIn)
+		}
+		if below >= in {
+			t.Fatalf("%s: monotonicity across the frozen transition: crossing %d >= freeze index %d", c.name, below, in)
+		}
+		if got := SelectF128(c.money, c.total, c.expected, dBelow); got != below {
+			t.Fatalf("%s: SelectF128(below)=%d != instrumented walk %d", c.name, got, below)
+		}
+		if got := SelectF128(c.money, c.total, c.expected, dIn); got != in {
+			t.Fatalf("%s: SelectF128(in)=%d != instrumented walk %d", c.name, got, in)
+		}
+	}
 }

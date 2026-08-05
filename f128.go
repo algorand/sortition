@@ -37,8 +37,9 @@ import (
 // It also shapes the ratio == 1.0 edge (all-0xff digest, or any digest with
 // >= 129 leading one bits): for some distributions the accumulated cdf rounds
 // up to exactly 1.0 at an early j and the walk stops there; in others it stays
-// below 1.0 for all j < money and the walk runs to money (see
-// TestSelectF128RatioExactlyOne and the SelectF128 doc comment).
+// below 1.0 and either freezes, causing the walk to return the promoted freeze
+// index, or remains live through every j < money and legitimately falls through
+// to money (see TestSelectF128RatioExactlyOne and the SelectF128 doc comment).
 type f128 struct {
 	hi, lo uint64
 	// exp is explicitly 64-bit: int is 32 bits on 386/arm, and a
@@ -525,16 +526,21 @@ func (b *binomialF128) cdf(j uint64) f128 {
 //	    double boundary = cdf(dist, j);               boundary := dist.cdf(j)
 //	    if (ratio <= boundary) {                      if ratio.cmp(boundary) <= 0 {
 //	      return j;                                     return j
-//	    }                                           }
-//	  }                                           }
-//	  return money;                               return money
-//	}                                           }
+//	    }                                             }
+//	                                                  if dist.frozen {
+//	                                                    return j
+//	                                                  }
+//	  }                                             }
+//	  return money;                                 return money
+//	}                                             }
 //
 // Boost computes cdf(dist, j) = ibetac(j+1, n-j, p) afresh each step in hardware
 // double, whereas dist.cdf(j) returns the same mathematical value as a running
 // PMF sum in software f128 (see binomialF128). The f128 path also receives the
 // digest ratio directly at f128 precision, and the success probability as its
 // exact integer numerator and denominator rather than a float64 quotient.
+// The frozen branch has no C++ counterpart: it is the documented SelectF128
+// policy for an f128 running sum that can no longer represent later CDF mass.
 //
 // Precondition: money < SelectF128MaxMoney (2^56). Below that bound no int64
 // exponent arithmetic in the walk can wrap, even at the most extreme
@@ -544,10 +550,18 @@ func (b *binomialF128) cdf(j uint64) f128 {
 // bound is undefined (Boost's Select cannot evaluate such money either).
 func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint64) uint64 {
 	dist := newBinomialF128(expectedSize, totalMoney, money)
-	if dist == nil { // p >= 1: cdf(j)==0 for j<money, cdf(money)==1
+	if dist == nil {
+		// newBinomialF128 returns nil iff expectedSize >= totalMoney.
+		// For nonzero totalMoney this is p >= 1: cdf(j)==0 for j<money,
+		// cdf(money)==1. The otherwise undefined totalMoney==0 case
+		// deliberately shares these deterministic degenerate semantics.
 		if ratio.isZero() {
+			// The inclusive inverse-CDF convention makes ratio 0 select the
+			// first index, 0.
 			return 0
 		}
+		// A positive ratio cannot cross any cdf(j)==0 boundary for j<money;
+		// it crosses cdf(money)==1, so the selected count is money.
 		return money
 	}
 	for j := uint64(0); j < money; j++ {
@@ -556,13 +570,20 @@ func binomialCDFWalkF128(expectedSize, totalMoney uint64, ratio f128, money uint
 			return j
 		}
 		if dist.frozen {
-			// The boundary can never increase again, so no remaining j can be
-			// selected: return the result the full walk would reach, without
-			// stepping through the up-to-money no-op iterations (for a
-			// near-maximum ratio above the CDF's plateau that walk could
-			// otherwise take hours at supply-sized money).
-			return money
+			// The boundary can never increase again. Promote the first frozen
+			// boundary to 1 and return its index, assigning the unresolved tail
+			// to one finite result instead of falling through to money after up
+			// to money no-op iterations. Using this first no-op index, rather
+			// than the preceding boundary, keeps the promoted tail above every
+			// ordinary crossing and preserves monotonicity in the digest.
+			return j
 		}
 	}
+	// Every represented boundary for j < money stayed below ratio without
+	// freezing, so the selected count is the ordinary inverse-CDF endpoint
+	// X=money. This is legitimately reachable for small distributions (for
+	// example ratio 1 at money=100, p=1/2; see
+	// TestSelectF128RatioExactlyOne) and is the same final endpoint used by the
+	// Boost reference walk.
 	return money
 }

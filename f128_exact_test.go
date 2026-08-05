@@ -74,10 +74,10 @@ func selectHighPrec(money, totalMoney, expectedSize uint64, vrfOutput Digest) ui
 }
 
 // inFrozenSliver reports whether the digest ratio is within the carved-out
-// near-1.0 region where the 128-bit walk's answer is DEFINED as money (see
-// the SelectF128 doc comment) and tolerance against exact math does not
-// apply. The bound (money+2)*2^-122 covers the plateau's ~money*2^-129 with
-// two orders of margin, including the boundary-crowding zone just above it.
+// near-1.0 region where the 128-bit walk promotes its first frozen boundary
+// to 1 (see the SelectF128 doc comment), so tolerance against exact math does
+// not apply. The bound (money+2)*2^-122 covers the plateau's ~money*2^-129
+// with two orders of margin, including the boundary-crowding zone above it.
 func inFrozenSliver(money uint64, ratio *big.Float) bool {
 	gap := new(big.Float).SetPrec(512).Sub(new(big.Float).SetPrec(512).SetInt64(1), ratio)
 	bound := new(big.Float).SetMantExp(new(big.Float).SetPrec(64).SetUint64(money+2), -122)
